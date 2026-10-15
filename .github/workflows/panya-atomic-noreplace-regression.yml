@@ -1,0 +1,55 @@
+name: PANYA Atomic No-Replace Regression R1
+
+on:
+  push:
+    branches:
+      - panya/atomic-no-replace-r1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: panya-atomic-noreplace-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  atomic-noreplace-regression:
+    name: ${{ matrix.name }} - Atomic No-Replace
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: Linux
+            os: ubuntu-24.04
+    steps:
+      - name: Checkout exact triggering commit
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Set up pinned pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install locked dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck workspace including FileService and AtomicFileWriter
+        run: pnpm typecheck
+
+      - name: Test AtomicFileWriter regressions
+        run: pnpm --filter '@lnwjud/filesystem' exec vitest run src/atomic-writer.test.ts
+
+      - name: Test FileService write regressions
+        run: pnpm --filter '@lnwjud/application' exec vitest run src/file-service-write.test.ts --fileParallelism=false
