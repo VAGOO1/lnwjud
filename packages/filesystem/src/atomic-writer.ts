@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { unlink, rename, writeFile } from 'node:fs/promises';
+import { link, unlink, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
 import { ensureParentDirectory } from './ensure-parent.js';
@@ -14,6 +14,8 @@ export interface AtomicWriteOptions {
    * after their initial workspace containment check.
    */
   readonly validateDestination?: () => Promise<Result<void>>;
+  /** Publish without replacing an existing destination (including symlinks). */
+  readonly createOnly?: boolean;
 }
 
 export class AtomicFileWriter {
@@ -40,7 +42,14 @@ export class AtomicFileWriter {
       const publish = await options.validateDestination?.();
       if (publish !== undefined && !publish.ok) return publish;
 
-      await rename(temporaryPath, filePath);
+      if (options.createOnly === true) {
+        // Both paths share a directory/volume. link is no-replace: EEXIST
+        // keeps the first publisher's bytes; never fall back to rename.
+        await link(temporaryPath, filePath);
+      } else {
+        // Existing explicit-replacement callers retain their behavior.
+        await rename(temporaryPath, filePath);
+      }
       return ok(undefined);
     } catch (error: unknown) {
       return err(mapNodeFsError(error, 'Atomic file write failed'));
