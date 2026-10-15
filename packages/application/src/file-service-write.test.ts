@@ -112,15 +112,72 @@ describe('FileService writes', () => {
     await expect(readFile(path.join(workspace.rootPath, 'src', 'file.txt'), 'utf8')).resolves.toBe('after');
   });
 
-  it('lets Full overwrite an existing file without overwriteExisting or userConfirmed while still checkpointing', async () => {
+  it('refuses implicit replacement under Full without creating a checkpoint', async () => {
     const workspace = await createWorkspace();
     const checkpoints = checkpointService();
-    await writeFile(path.join(workspace.rootPath, 'src', 'file.txt'), 'before', 'utf8');
-    const service = new FileService(repository(workspace), undefined, undefined, { checkpointService: checkpoints, profile: permissionProfiles.full });
-    const result = await service.writeFile(actor, workspace.id, { path: path.join('src', 'file.txt'), content: 'after' });
+    const target = path.join(workspace.rootPath, 'src', 'file.txt');
+    await writeFile(target, 'before', 'utf8');
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      checkpointService: checkpoints, profile: permissionProfiles.full,
+    });
+    const result = await service.writeFile(actor, workspace.id, {
+      path: path.join('src', 'file.txt'), content: 'after',
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    expect(checkpoints.calls).toEqual([]);
+    await expect(readFile(target, 'utf8')).resolves.toBe('before');
+  });
+
+  it('permits Full replacement only when overwriteExisting is explicit and checkpoints', async () => {
+    const workspace = await createWorkspace();
+    const checkpoints = checkpointService();
+    const target = path.join(workspace.rootPath, 'src', 'file.txt');
+    await writeFile(target, 'before', 'utf8');
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      checkpointService: checkpoints, profile: permissionProfiles.full,
+    });
+    const result = await service.writeFile(actor, workspace.id, {
+      path: path.join('src', 'file.txt'), content: 'after',
+      overwriteExisting: true, userConfirmed: true,
+    });
     expect(result).toMatchObject({ ok: true, value: { checkpointId: 'checkpoint-1' } });
     expect(checkpoints.calls).toEqual([[path.join('src', 'file.txt')]]);
-    await expect(readFile(path.join(workspace.rootPath, 'src', 'file.txt'), 'utf8')).resolves.toBe('after');
+    await expect(readFile(target, 'utf8')).resolves.toBe('after');
+  });
+
+  it('permits only one concurrent create-only writer under Full', async () => {
+    const workspace = await createWorkspace();
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      profile: permissionProfiles.full,
+    });
+    const outcomes = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      service.writeFile(actor, workspace.id, {
+        path: path.join('src', 'race.txt'), content: 'writer-' + i,
+        overwriteExisting: false,
+      }),
+    ));
+    const winners = outcomes.flatMap((result, i) => result.ok ? [i] : []);
+    expect(winners).toHaveLength(1);
+    expect(outcomes.filter((result) => !result.ok)).toHaveLength(19);
+    await expect(readFile(path.join(workspace.rootPath, 'src', 'race.txt'), 'utf8'))
+      .resolves.toBe('writer-' + winners[0]);
+  });
+
+  it('rejects create-only writes through a junction/symlink outside the workspace', async () => {
+    const workspace = await createWorkspace();
+    const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-noreplace-outside-'));
+    temporaryRoots.push(outsideRoot);
+    const outside = await realpath(outsideRoot);
+    const junction = path.join(workspace.rootPath, 'src', 'outside');
+    await symlink(outside, junction, process.platform === 'win32' ? 'junction' : 'dir');
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      profile: permissionProfiles.full,
+    });
+    const result = await service.writeFile(actor, workspace.id, {
+      path: path.join('src', 'outside', 'escaped.txt'), content: 'must stay local',
+    });
+    expect(result).toMatchObject({ ok: false, error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+    await expect(readFile(path.join(outside, 'escaped.txt'), 'utf8')).rejects.toThrow();
   });
 
   it('captures a checkpoint before atomically overwriting an existing file', async () => {
