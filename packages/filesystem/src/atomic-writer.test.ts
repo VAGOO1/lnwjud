@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -50,4 +50,64 @@ describe('AtomicFileWriter', () => {
     await expect(readFile(target, 'utf8')).resolves.toBe('before\n');
     expect(await readdir(root)).toEqual(['file.txt']);
   });
+
+  it('refuses EEXIST without changing an existing destination', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-noreplace-'));
+    temporaryRoots.push(root);
+    const target = path.join(root, 'existing.txt');
+    await writeFile(target, 'original');
+    const result = await new AtomicFileWriter().write(target, 'replacement', { createOnly: true });
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await expect(readFile(target, 'utf8')).resolves.toBe('original');
+    expect(await readdir(root)).toEqual(['existing.txt']);
+  });
+
+  it('publishes exactly one of 20 concurrent create-only writes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-noreplace-'));
+    temporaryRoots.push(root);
+    const target = path.join(root, 'race.txt');
+    const writer = new AtomicFileWriter();
+    const outcomes = await Promise.all(Array.from({ length: 20 }, (_, i) =>
+      writer.write(target, 'candidate-' + i, { createOnly: true }),
+    ));
+    const winners = outcomes.flatMap((result, i) => result.ok ? [i] : []);
+    expect(winners).toHaveLength(1);
+    expect(outcomes.filter((result) => !result.ok)).toHaveLength(19);
+    await expect(readFile(target, 'utf8')).resolves.toBe('candidate-' + winners[0]);
+    expect(await readdir(root)).toEqual(['race.txt']);
+  });
+
+  it('does not clobber a file created after the final guard validation', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-noreplace-'));
+    temporaryRoots.push(root);
+    const target = path.join(root, 'late.txt');
+    let validations = 0;
+    const validateDestination = async (): Promise<Result<void>> => {
+      validations += 1;
+      if (validations === 3) await writeFile(target, 'rival', { flag: 'wx' });
+      return ok(undefined);
+    };
+    const result = await new AtomicFileWriter().write(target, 'candidate', {
+      createOnly: true, validateDestination,
+    });
+    expect(validations).toBe(3);
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await expect(readFile(target, 'utf8')).resolves.toBe('rival');
+    expect(await readdir(root)).toEqual(['late.txt']);
+  });
+
+  it('refuses to replace a symlink destination or its target', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-noreplace-'));
+    temporaryRoots.push(root);
+    const original = path.join(root, 'original.txt');
+    const alias = path.join(root, 'alias.txt');
+    await writeFile(original, 'protected');
+    await symlink(original, alias, 'file');
+    const result = await new AtomicFileWriter().write(alias, 'candidate', { createOnly: true });
+    expect(result).toMatchObject({ ok: false, error: { code: 'INVALID_INPUT' } });
+    await expect(readFile(original, 'utf8')).resolves.toBe('protected');
+    await expect(readFile(alias, 'utf8')).resolves.toBe('protected');
+    expect((await readdir(root)).sort()).toEqual(['alias.txt', 'original.txt']);
+  });
+
 });
