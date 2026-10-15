@@ -340,7 +340,7 @@ export class FileService {
     if (existing.value === 'directory') return err(appError('INVALID_INPUT', 'Directories cannot be written as files'));
     const fullProfile = this.profileProvider().name === 'full';
     const applicationApproved = isApplicationAuthorized(authorization, request.userConfirmed === true) || fullProfile;
-    if (existing.value && request.overwriteExisting !== true && !fullProfile) {
+    if (existing.value && request.overwriteExisting !== true) {
       return err(appError('INVALID_INPUT', 'Target already exists; use edit_file for a narrow repair or set overwriteExisting after reviewing the full replacement'));
     }
     if (existing.value && !applicationApproved) {
@@ -358,7 +358,11 @@ export class FileService {
     }
     if (isAborted(signal)) return cancelledFileMutation();
     const validateDestination = createGuardedWriteValidator(this.guard, workspace, request.path, resolved.value, authorization);
-    const writeResult = await this.writer.write(resolved.value.realPath ?? resolved.value.absolutePath, request.content, { validateDestination });
+    const writeResult = await this.writer.write(
+      resolved.value.realPath ?? resolved.value.absolutePath,
+      request.content,
+      { validateDestination, createOnly: request.overwriteExisting !== true },
+    );
     if (!writeResult.ok) return writeResult;
     return ok({
       path: resultPath(resolved.value),
