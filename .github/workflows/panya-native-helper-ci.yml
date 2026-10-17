@@ -108,6 +108,22 @@ jobs:
       - name: Typecheck integration
         shell: pwsh
         run: pnpm typecheck
+      - name: Admit R2 isolated integration fixture root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNNER_TEMP -or -not $env:GITHUB_ENV) { throw 'CI_STAGE_CONTEXT_MISSING' }
+          $stageName = 'PANYA_LNWJUD_NATIVE_LAUNCHER_REPAIR_R1_20261017'
+          $parent = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
+          if (-not [IO.Path]::IsPathFullyQualified($parent)) { throw 'CI_STAGE_PARENT_INVALID' }
+          $stage = Join-Path $parent $stageName
+          if (Test-Path -LiteralPath $stage) { throw 'CI_STAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
+          $item = Get-Item -LiteralPath $stage -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'CI_STAGE_ROOT_UNSAFE' }
+          $resolved = (Resolve-Path -LiteralPath $stage -ErrorAction Stop).ProviderPath
+          if ($item.Name -cne $stageName -or $resolved -ine [IO.Path]::GetFullPath($stage)) { throw 'CI_STAGE_ROOT_MISMATCH' }
+          "PANYA_NATIVE_STAGE_TEST_ROOT=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Native launcher static and writer contracts
         shell: pwsh
         run: pnpm exec vitest run tests/P1-host-integration.static-contract.test.ts tests/P1-native-writer-contract.test.ts tests/windows-contained-launch.native-contract.test.ts --reporter=verbose
