@@ -1,8 +1,9 @@
+// PANYA P1 source-only integration (pinned MIT v5.8.7, not built/tested).
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
-import { prepareWindowsContainedLaunch, readWindowsContainmentReceipt } from '@lnwjud/process';
+import { prepareWindowsContainedLaunch, readWindowsContainmentReceipt, type TrustedWindowsHelper, type NativeReceiptExpectation } from '@lnwjud/process';
 import { promisify } from 'node:util';
 import { appError, err, ok, type GoalTaskCancellationObservation, type Result } from '@lnwjud/domain';
 import {
@@ -33,6 +34,9 @@ export interface DurableShellLaunchRequest {
 
 interface DurableTaskMetadata {
   readonly containment?: 'windows_job_v1';
+  // Only NEW UUID native jobs carry exact Host-owned receipt expectations.
+  // Legacy tasks lacking native_receipt remain termination_unverified.
+  native_receipt?: { readonly receiptPath: string; readonly cancelPath: string; readonly expected: NativeReceiptExpectation };
   readonly version: 1;
   readonly task_id: string;
   readonly command_fingerprint?: string;
@@ -58,7 +62,7 @@ interface DurableTaskMetadata {
 }
 
 interface DurableWorkerSpec {
-  readonly containment?: { readonly receiptPath: string; readonly cancelPath: string };
+  readonly containment?: { readonly receiptPath: string; readonly cancelPath: string; readonly expected: NativeReceiptExpectation };
   readonly version: 1;
   readonly taskId: string;
   readonly executable: string;
@@ -110,6 +114,7 @@ function repositoryImportBootstrapEnvironment(): NodeJS.ProcessEnv {
 export interface DurableShellTaskStoreOptions {
   readonly maxConcurrentTasks?: number;
   readonly platform?: NodeJS.Platform;
+  readonly nativeHelper?: TrustedWindowsHelper;
 }
 
 export const DEFAULT_MAX_CONCURRENT_DURABLE_TASKS = 16;
@@ -118,10 +123,12 @@ export class DurableShellTaskStore {
   private readonly maxConcurrentTasks: number;
   private readonly platform: NodeJS.Platform;
   private readonly activeIndex: DurableShellTaskIndex;
+  private readonly nativeHelper?: TrustedWindowsHelper;
 
   public constructor(private readonly rootDirectory: string, options: DurableShellTaskStoreOptions = {}) {
     this.maxConcurrentTasks = normalizeMaxConcurrentTasks(options.maxConcurrentTasks);
     this.platform = options.platform ?? process.platform;
+    this.nativeHelper = options.nativeHelper;
     this.activeIndex = new DurableShellTaskIndex(rootDirectory, {
       maxConcurrentTasks: this.maxConcurrentTasks,
       inspectTask: async (taskId): Promise<ActiveTaskInspection> => this.inspectTaskForIndex(taskId),
@@ -184,6 +191,7 @@ export class DurableShellTaskStore {
     }
 
     let workerOwnsReservation = false;
+    let workerLaunchAttempted = false;
     const taskDirectory = this.taskDirectory(request.taskId);
     const deadlineAt = new Date(Date.now() + request.timeoutSeconds * 1000).toISOString();
     const metadataPath = path.join(taskDirectory, METADATA_FILENAME);
@@ -228,18 +236,47 @@ export class DurableShellTaskStore {
     try {
       await mkdir(taskDirectory, { recursive: true });
       await mkdir(this.rootDirectory, { recursive: true });
+      // Durable task IDs may NOT be UUIDs. Bind a fresh UUID Job directory
+      // UNDER the existing task, preserving the original durable task identity.
       const contained = this.platform === 'win32' ? await prepareWindowsContainedLaunch({
-        directory: taskDirectory, executable: request.executable, args: request.arguments, cwd: request.cwd, timeoutMs: request.timeoutSeconds * 1000,
+        directory: path.join(taskDirectory, 'native', randomUUID()),
+        executable: request.executable, args: request.arguments, cwd: request.cwd,
+        timeoutMs: request.timeoutSeconds * 1000,
         windowsVerbatimArguments: request.windowsVerbatimArguments === true,
+        ...(this.nativeHelper === undefined ? {} : { nativeHelper: this.nativeHelper }),
+        requestDigest,
       }) : undefined;
+      const nativeExpectation: NativeReceiptExpectation | undefined = contained === undefined ? undefined : {
+        jobId: contained.jobId, requestDigest: contained.requestDigest,
+        specSha256: contained.specSha256,
+      };
+      if (contained !== undefined && nativeExpectation !== undefined) {
+        // Store the Host binding in the shared reservation index BEFORE
+        // worker spawn; an unbound/unknown marker must never be reclaimed.
+        const bound = await this.activeIndex.bindNativeReceipt(
+          request.taskId, requestDigest, contained.receiptPath, nativeExpectation,
+        );
+        if (!bound.ok) throw new Error('NATIVE_RECEIPT_RESERVATION_NOT_BOUND');
+        metadata.native_receipt = {
+          receiptPath: contained.receiptPath, cancelPath: contained.cancelPath,
+          expected: nativeExpectation,
+        };
+      }
       const workerSpec: DurableWorkerSpec = contained === undefined ? spec : {
         ...spec, executable: contained.executable, arguments: contained.args,
         windowsVerbatimArguments: false,
-        containment: { receiptPath: contained.receiptPath, cancelPath: contained.cancelPath },
+        // Grace belongs ONLY to the coordinator; the helper enforces the
+        // original deadline and needs time to terminate descendants + receipt.
+        timeoutMs: spec.timeoutMs + 15_000,
+        containment: {
+          receiptPath: contained.receiptPath, cancelPath: contained.cancelPath,
+          expected: nativeExpectation!,
+        },
       };
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8');
       await writeFile(specPath, JSON.stringify(workerSpec), 'utf8');
       const workerPath = await this.ensureWorkerScript();
+      workerLaunchAttempted = true;
       const worker = spawn(process.execPath, [workerPath, specPath], {
         // The durable worker only coordinates the real child process; it does not need
         // the workspace as its own cwd. Keeping the worker outside the workspace avoids
@@ -273,12 +310,15 @@ export class DurableShellTaskStore {
       return ok(await this.snapshotFromMetadata(metadata));
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : 'Durable task could not start';
-      metadata.state = 'failed';
+      // If worker spawn was attempted but its identity is not verified,
+      // preserve UNKNOWN and keep reservation. Exit/error is not proof of no-op.
+      metadata.state = workerLaunchAttempted ? 'termination_unverified' : 'failed';
       metadata.exit_code = -1;
       metadata.error = `Durable task could not start: ${message}`;
-      metadata.finished_at = new Date().toISOString();
+      if (workerLaunchAttempted) delete metadata.finished_at;
+      else metadata.finished_at = new Date().toISOString();
       await writeFile(metadataPath, JSON.stringify(metadata), 'utf8').catch(() => undefined);
-      if (!workerOwnsReservation) await this.activeIndex.release(request.taskId, requestDigest);
+      if (!workerOwnsReservation && !workerLaunchAttempted) await this.activeIndex.release(request.taskId, requestDigest);
       return err(appError('INTERNAL_ERROR', 'Durable task could not start', true));
     }
   }
@@ -465,7 +505,10 @@ export class DurableShellTaskStore {
       return ok(await this.snapshotFromMetadata(metadata));
     }
     if (metadata.containment === 'windows_job_v1') {
-      await writeFile(path.join(this.taskDirectory(taskId), 'containment.cancel'), 'cancel', { mode: 0o600 });
+      if (metadata.native_receipt === undefined) {
+        return ok(await this.snapshotFromMetadata({ ...metadata, state: 'termination_unverified', error: 'Legacy/unbound native cancellation requires independent reconciliation' }));
+      }
+      await writeFile(metadata.native_receipt.cancelPath, 'cancel', { flag: 'wx', mode: 0o600 }).catch(() => undefined);
       const deadline = Date.now() + 12_000;
       while (Date.now() < deadline) {
         const latest = await this.readMetadata(taskId);
@@ -630,7 +673,8 @@ export class DurableShellTaskStore {
     if (finalized !== undefined) return finalized;
 
     if (current.containment === 'windows_job_v1') {
-      const receipt = await readWindowsContainmentReceipt(path.join(this.taskDirectory(current.task_id), 'containment.receipt.json'));
+      const receipt = current.native_receipt === undefined ? undefined :
+        await readWindowsContainmentReceipt(current.native_receipt.receiptPath, current.native_receipt.expected);
       current.state = receipt === undefined ? 'termination_unverified' : receipt.outcome === 'completed' ? (receipt.exitCode === 0 ? 'completed' : 'failed') : receipt.outcome;
       if (receipt === undefined) {
         current.error = 'Native containment termination could not be verified';
@@ -1096,7 +1140,9 @@ function delay(milliseconds: number): Promise<void> {
 }
 
 const DURABLE_WORKER_SOURCE = String.raw`import { execFile, spawn } from 'node:child_process';
-import { readFile, writeFile, open, rename, unlink } from 'node:fs/promises';
+import { readFile, writeFile, open, rename, unlink, lstat } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -1240,11 +1286,34 @@ async function stopTree(pid) {
 }
 
 async function containmentReceipt() {
-  if (!spec.containment) return undefined;
+  if (!spec.containment || !spec.containment.expected) return undefined;
   try {
+    const expected = spec.containment.expected;
+    const marker = JSON.parse(await readFile(spec.activeMarkerPath, 'utf8'));
+    const saved = marker?.nativeReceiptExpected;
+    if (marker?.taskId !== spec.taskId || marker.requestDigest !== spec.requestDigest ||
+        marker.nativeReceiptPath !== spec.containment.receiptPath ||
+        !saved || saved.jobId !== expected.jobId ||
+        saved.requestDigest !== expected.requestDigest ||
+        saved.specSha256 !== expected.specSha256) return undefined;
+    const dir = path.dirname(spec.containment.receiptPath);
+    if (path.basename(dir).toLowerCase() !== expected.jobId.toLowerCase()) return undefined;
+    const [receiptStat, specStat] = await Promise.all([
+      lstat(spec.containment.receiptPath), lstat(path.join(dir, 'containment.json')),
+    ]);
+    if (!receiptStat.isFile() || receiptStat.isSymbolicLink() ||
+        !specStat.isFile() || specStat.isSymbolicLink()) return undefined;
+    const bytes = await readFile(path.join(dir, 'containment.json'));
+    const specSha256 = createHash('sha256').update(bytes).digest('hex');
+    if (specSha256 !== expected.specSha256) return undefined;
+    const nativeSpec = JSON.parse(bytes.toString('utf8'));
+    if (nativeSpec.jobId !== expected.jobId ||
+        nativeSpec.requestDigest !== expected.requestDigest) return undefined;
     const receipt = JSON.parse(await readFile(spec.containment.receiptPath, 'utf8'));
     return receipt.kind === 'windows_job_v1' && receipt.activeProcesses === 0 && Number.isInteger(receipt.exitCode)
-      && ['completed', 'cancelled', 'timed_out'].includes(receipt.outcome) ? receipt : undefined;
+      && ['completed', 'cancelled', 'timed_out'].includes(receipt.outcome)
+      && receipt.jobId === expected.jobId && receipt.requestDigest === expected.requestDigest
+      && receipt.specSha256 === expected.specSha256 ? receipt : undefined;
   } catch { return undefined; }
 }
 
@@ -1267,7 +1336,16 @@ async function finish(state, exitCode, error) {
   await Promise.allSettled([...pendingWrites]);
   await Promise.allSettled([stdoutHandle.close(), stderrHandle.close()]);
   const persisted = await persist().then(() => true, () => false);
-  if (persisted && state !== 'termination_unverified') await releaseReservation();
+  let confirmed = false;
+  if (persisted && state !== 'termination_unverified') {
+    try {
+      const stored = JSON.parse(await readFile(spec.metadataPath, 'utf8'));
+      confirmed = stored.state === state && stored.exit_code === exitCode &&
+        typeof stored.finished_at === 'string';
+      if (spec.containment) confirmed = confirmed && (await containmentReceipt()) !== undefined;
+    } catch { confirmed = false; }
+  }
+  if (confirmed) await releaseReservation();
 }
 
 try {

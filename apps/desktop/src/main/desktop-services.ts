@@ -1,9 +1,11 @@
+// PANYA P1 source-only Host integration; pinned MIT v5.8.7 — unbuilt.
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { open, readFile } from 'node:fs/promises';
 import path from 'node:path';
+import { hostTrustedWindowsHelper } from '@lnwjud/process';
 import os from 'node:os';
 import { sampleOwnedProcessMetrics } from './resource-process-metrics.js';
 import { hasInspectableGoalResults } from './doctor-goal-evidence.js';
@@ -502,7 +504,12 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   });
   const workspaceService = new WorkspaceService(workspaceRepository);
   const writerAdmission = new SharedManagedWriterAdmission(path.join(dataPath, 'background-tasks'));
-  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git') });
+  // Packaged Electron Host identity only; an absent release SHA pin
+  // prevents all new contained launches (never falls back to PowerShell).
+  const hostNativeHelper = hostTrustedWindowsHelper(
+    (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  );
+  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git'), ...(hostNativeHelper === undefined ? {} : { nativeHelper: hostNativeHelper }) });
   const codexDiscovery = new CodexDiscovery();
   const executableResolver = new PathExecutableResolver();
   const storedProfile = settingsRepository.get(permissionSettingKey);
@@ -528,6 +535,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   const processService = new ProcessService(workspaceRepository, {
     writerAdmission,
     nativeContainmentRoot: path.join(dataPath, 'native-managed-processes'),
+    ...(hostNativeHelper === undefined ? {} : { nativeHelper: hostNativeHelper }),
     projectService,
     profileProvider: activePermissionProfile,
     defaultTimeoutMsProvider: (): number => readSettings().processTimeoutMs,
@@ -633,7 +641,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     (await workspaceRepository.list())
       .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath))
       .map((workspace) => workspace.realRootPath)
-  ), unrestricted, () => readSettings().capabilityRoots, () => readSettings().shellSynchronousWaitSeconds, options.nativeCapabilityApi);
+  ), unrestricted, () => readSettings().capabilityRoots, () => readSettings().shellSynchronousWaitSeconds, options.nativeCapabilityApi, hostNativeHelper);
   const taskCancellation = new GoalTaskCancellationService([
     { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
     { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
@@ -780,7 +788,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     search: searchService,
     workspaceIndex,
     git: gitService,
-    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath)),
+    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath, hostNativeHelper)),
     process: processService,
     codex: codexService,
     agentSwarm: agentSwarmService,

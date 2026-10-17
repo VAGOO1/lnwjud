@@ -1,3 +1,4 @@
+// PANYA P1 source-only Host integration candidate; pinned MIT v5.8.7.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { realpath, stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -13,7 +14,7 @@ import {
   type InvocationAuthorization,
   type Result,
 } from '@lnwjud/domain';
-import { createProcessTreeTerminator, PathExecutableResolver, toSpawnInvocation, type ExecutableResolver, type ProcessTreeTerminator } from '@lnwjud/process';
+import { createProcessTreeTerminator, PathExecutableResolver, toSpawnInvocation, type ExecutableResolver, type ProcessTreeTerminator, type TrustedWindowsHelper } from '@lnwjud/process';
 import { engineeringCommandFingerprint, formatEngineeringCommand } from '@lnwjud/shared';
 import type { CapabilityBackend } from './local-capability-service.js';
 import { prohibitedAgentCommandReason, riskyAgentCommandReason } from './agent-command-policy.js';
@@ -81,6 +82,7 @@ export interface ShellCapabilityOptions {
   readonly defaultTimeoutSeconds?: number;
   readonly defaultBackgroundTimeoutSeconds?: number;
   readonly taskStateDirectory?: string;
+  readonly nativeHelper?: TrustedWindowsHelper;
   readonly autoWaitSeconds?: number;
   readonly maxSynchronousWaitSeconds?: number;
   readonly maxSynchronousWaitSecondsProvider?: () => number;
@@ -149,7 +151,7 @@ export class ShellCapabilityBackend implements CapabilityBackend {
     this.terminator = options.terminator ?? createProcessTreeTerminator();
     this.defaultTimeoutSeconds = clampNumber(options.defaultTimeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS, 0.1, MAX_TIMEOUT_SECONDS);
     this.defaultBackgroundTimeoutSeconds = clampNumber(options.defaultBackgroundTimeoutSeconds ?? DEFAULT_BACKGROUND_TIMEOUT_SECONDS, 0.1, MAX_TIMEOUT_SECONDS);
-    this.durableStore = options.taskStateDirectory === undefined ? undefined : new DurableShellTaskStore(path.resolve(options.taskStateDirectory));
+    this.durableStore = options.taskStateDirectory === undefined ? undefined : new DurableShellTaskStore(path.resolve(options.taskStateDirectory), { ...(options.nativeHelper === undefined ? {} : { nativeHelper: options.nativeHelper }) });
     this.autoWaitSeconds = clampNumber(options.autoWaitSeconds ?? DEFAULT_AUTO_WAIT_SECONDS, 0, DEFAULT_TIMEOUT_SECONDS);
     this.maxSynchronousWaitSeconds = clampNumber(options.maxSynchronousWaitSeconds ?? DEFAULT_MAX_SYNCHRONOUS_WAIT_SECONDS, 0.01, 90);
     this.maxSynchronousWaitSecondsProvider = options.maxSynchronousWaitSecondsProvider;

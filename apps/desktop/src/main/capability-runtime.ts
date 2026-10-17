@@ -1,3 +1,4 @@
+// PANYA P1 source-only Host integration; pinned MIT v5.8.7 — unbuilt.
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -15,7 +16,7 @@ import {
   MacosProcessBridge,
   type NativeHostProcessBridge,
 } from '@lnwjud/capabilities';
-import { createProcessTreeTerminator } from '@lnwjud/process';
+import { createProcessTreeTerminator, type TrustedWindowsHelper } from '@lnwjud/process';
 import type { DashboardSnapshot } from '@lnwjud/ipc-contracts';
 import { DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS } from '@lnwjud/shared';
 import { createElectronNativeCapabilityBackends, type ElectronNativeCapabilityApi } from './electron-native-capability-backend.js';
@@ -34,6 +35,7 @@ export function createLocalCapabilityRuntime(
   configuredRootsProvider: () => readonly string[] = () => [],
   synchronousWaitSecondsProvider: () => number = () => DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS,
   nativeApi?: ElectronNativeCapabilityApi,
+  nativeHelper?: TrustedWindowsHelper,
 ): LocalCapabilityRuntime {
   const bridgeSizeBytes = capabilityBridgeExpectedSizeBytes();
   const ocrPath = windowsOcrHelperPath();
@@ -55,6 +57,7 @@ export function createLocalCapabilityRuntime(
     synchronousWaitSecondsProvider,
     ...(nativeApi === undefined ? {} : { shared: createElectronNativeCapabilityBackends({ platform: process.platform, api: nativeApi, allowedRootsProvider: workspaceRootsProvider }) }),
     ...(windows === undefined ? {} : { windows }),
+    ...(nativeHelper === undefined ? {} : { nativeHelper }),
     ...(nativeHost === undefined ? {} : { nativeHost }),
   });
   return { service: runtime.service, health: runtime.health, shell: runtime.shell, domCdp: runtime.domCdp };

@@ -1,3 +1,4 @@
+# PANYA P1 source-only packaging candidate. No Windows installer build authorized.
 appId: com.lnwjud.desktop
 productName: lnwjud
 asar: true
@@ -70,6 +71,11 @@ win:
       to: windows-ocr
     - from: ../../native/windows-secret-migrator/bin/win-x64
       to: windows-secret-migrator
+    # PANYA P1 candidate — actual win-x64 artifact + SHA release pin must be
+    # created and verified by a separately authorized official Build package.
+    # This staging source is NOT a packaged release.
+    - from: ../../native/windows-containment-helper/bin/win-x64
+      to: windows-containment-helper
 mac:
   sign: scripts/sign-macos-runtime.mjs
   icon: build/icon-1024.png

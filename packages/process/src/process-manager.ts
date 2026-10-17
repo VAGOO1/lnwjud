@@ -1,3 +1,4 @@
+// PANYA P1 source-only integration candidate; pinned upstream v5.8.7 / MIT notice retained in LICENSE.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
@@ -7,7 +8,7 @@ import { PathExecutableResolver, type ExecutableResolver } from './executable-re
 import { LogRingBuffer } from './ring-buffer.js';
 import { createProcessTreeTerminator, type ProcessTreeTerminator } from './process-tree.js';
 import { createSpawnInvocationFactory, type SpawnInvocationFactory } from './spawn-invocation.js';
-import { prepareWindowsContainedLaunch, readWindowsContainmentReceipt, type WindowsContainmentReceipt } from './windows-contained-launch.js';
+import { prepareWindowsContainedLaunch, readWindowsContainmentReceipt, type WindowsContainmentReceipt, type WindowsContainedLaunch, type NativeReceiptExpectation, type TrustedWindowsHelper } from './windows-contained-launch.js';
 import type { LogQuery, ManagedProcess, ManagedProcessStart, ManagedProcessState, ProcessLogResult } from './process-types.js';
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
@@ -26,6 +27,7 @@ interface ManagedRecord {
   readonly logs: LogRingBuffer;
   readonly nativeReceiptPath?: string;
   readonly nativeCancelPath?: string;
+  readonly nativeExpectation?: NativeReceiptExpectation;
   readonly onVerifiedNativeTermination?: () => void;
   nativeTerminationNotified?: boolean;
   state: ManagedProcessState;
@@ -49,6 +51,7 @@ export class ProcessManager {
     private readonly maxActiveProcesses: number = DEFAULT_MAX_ACTIVE_MANAGED_PROCESSES,
     private readonly invocationFactory: SpawnInvocationFactory = createSpawnInvocationFactory(),
     private readonly nativeContainmentRoot?: string,
+    private readonly nativeHelper?: TrustedWindowsHelper,
   ) {}
 
   public async start(
@@ -56,6 +59,7 @@ export class ProcessManager {
     signal?: AbortSignal,
     onCreated?: (process: ManagedProcess) => void,
     onVerifiedNativeTermination?: () => void,
+    onPreparedNative?: (launch: WindowsContainedLaunch) => Promise<Result<void>>,
   ): Promise<Result<ManagedProcess>> {
     // A writer reservation is safe to release only before any child is spawned,
     // or after a launched child has verified native zero-active termination.
@@ -92,9 +96,22 @@ export class ProcessManager {
           timeoutMs: spec.timeoutMs ?? DEFAULT_TIMEOUT_MS,
           ...(invocation.value.windowsVerbatimArguments === undefined
             ? {} : { windowsVerbatimArguments: invocation.value.windowsVerbatimArguments }),
+          ...(this.nativeHelper === undefined ? {} : { nativeHelper: this.nativeHelper }),
         });
       } catch {
         return rejectBeforeSpawn(err(appError('INTERNAL_ERROR', 'Native process containment could not be prepared')));
+      }
+      if (isAborted(signal)) return rejectBeforeSpawn(cancelledStart());
+      // Writer's protected reservation MUST bind the expected receipt before
+      // ANY helper process starts. No callback means no contained launch.
+      if (onPreparedNative === undefined) {
+        return rejectBeforeSpawn(err(appError('CONFLICT', 'Native writer receipt binding is unavailable')));
+      }
+      try {
+        const bound = await onPreparedNative(contained);
+        if (!bound.ok) return rejectBeforeSpawn(bound);
+      } catch {
+        return rejectBeforeSpawn(err(appError('CONFLICT', 'Native writer receipt binding could not be verified')));
       }
       if (isAborted(signal)) return rejectBeforeSpawn(cancelledStart());
     }
@@ -113,7 +130,15 @@ export class ProcessManager {
       spec,
       startedAt: new Date().toISOString(),
       logs: new LogRingBuffer(),
-      ...(contained === undefined ? {} : { nativeReceiptPath: contained.receiptPath, nativeCancelPath: contained.cancelPath }),
+      ...(contained === undefined ? {} : {
+        nativeReceiptPath: contained.receiptPath,
+        nativeCancelPath: contained.cancelPath,
+        nativeExpectation: {
+          jobId: contained.jobId,
+          requestDigest: contained.requestDigest,
+          specSha256: contained.specSha256,
+        },
+      }),
       ...(onVerifiedNativeTermination === undefined ? {} : { onVerifiedNativeTermination }),
       state: 'starting',
     };
@@ -246,7 +271,7 @@ export class ProcessManager {
 
   private async handleNativeClose(record: ManagedRecord): Promise<void> {
     if (record.nativeReceiptPath === undefined) return;
-    const receipt = await readWindowsContainmentReceipt(record.nativeReceiptPath);
+    const receipt = await readWindowsContainmentReceipt(record.nativeReceiptPath, record.nativeExpectation);
     if (receipt === undefined) {
       this.markTerminationUnverified(record, 'Native process Job Object completion is unverified');
       return;
@@ -300,7 +325,7 @@ export class ProcessManager {
       }
       const deadline = Date.now() + 12000;
       while (Date.now() < deadline) {
-        const receipt = await readWindowsContainmentReceipt(record.nativeReceiptPath);
+        const receipt = await readWindowsContainmentReceipt(record.nativeReceiptPath, record.nativeExpectation);
         if (receipt !== undefined) {
           this.acceptNativeReceipt(record, receipt);
           return true;

@@ -1,3 +1,4 @@
+// PANYA P1 source-only Host integration; pinned MIT v5.8.7 — UNTESTED.
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
@@ -14,7 +15,7 @@ import {
   type Result,
 } from '@lnwjud/domain';
 import { CommandPolicy, DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@lnwjud/permissions';
-import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@lnwjud/process';
+import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult, type TrustedWindowsHelper, type WindowsContainedLaunch } from '@lnwjud/process';
 import { JsCommandDetector, ProjectDetector, type ProjectCommandKind } from '@lnwjud/project';
 import { prohibitedAgentCommandReason, riskyAgentCommandReason } from '@lnwjud/shared';
 import { isAbsoluteHostPath, isHostPathWithin, resolveHostPath, WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@lnwjud/workspace';
@@ -30,7 +31,7 @@ export interface ProcessStartRequest {
 }
 
 export interface ProcessManagerPort {
-  start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void, onVerifiedNativeTermination?: () => void): Promise<Result<ManagedProcess>>;
+  start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void, onVerifiedNativeTermination?: () => void, onPreparedNative?: (launch: WindowsContainedLaunch) => Promise<Result<void>>): Promise<Result<ManagedProcess>>;
   list?(): readonly ManagedProcess[];
   status(processId: string): Result<ManagedProcess>;
   logs(processId: string, query: LogQuery): Result<ProcessLogResult>;
@@ -44,6 +45,7 @@ export interface ProjectCommandSource {
 export interface ProcessServiceDependencies {
   readonly writerAdmission?: ManagedWriterAdmissionPort;
   readonly nativeContainmentRoot?: string;
+  readonly nativeHelper?: TrustedWindowsHelper;
   readonly processManager?: ProcessManagerPort;
   readonly projectService?: ProjectCommandSource;
   readonly guard?: WorkspacePathGuard;
@@ -86,7 +88,7 @@ export class ProcessService {
   ) {
     this.nativeContainmentRoot = dependencies.nativeContainmentRoot;
     this.writerAdmission = dependencies.writerAdmission;
-    this.processManager = dependencies.processManager ?? new ProcessManager(undefined, undefined, undefined, undefined, dependencies.nativeContainmentRoot);
+    this.processManager = dependencies.processManager ?? new ProcessManager(undefined, undefined, undefined, undefined, dependencies.nativeContainmentRoot, dependencies.nativeHelper);
     this.projectService = dependencies.projectService ?? new ProjectService(
       workspaces,
       new ProjectDetector(),
@@ -270,7 +272,13 @@ export class ProcessService {
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     }, signal, (process) => {
       this.owners.set(process.processId, { actorId: actor.clientId, sessionId: actorSessionId(actor), workspaceId });
-    }, () => { if (reservation?.ok) void reservation.value.releaseAfterVerifiedTermination(); });
+    }, () => { if (reservation?.ok) void reservation.value.releaseAfterVerifiedTermination(); },
+    async (launch: WindowsContainedLaunch): Promise<Result<void>> => {
+      if (!reservation?.ok || reservation.value.bindNativeReceipt === undefined) {
+        return err(appError('CONFLICT', 'Native writer receipt binding is missing', true));
+      }
+      return reservation.value.bindNativeReceipt(launch);
+    });
     if (started.ok && isAborted(signal)) {
       // A process can be spawned just before goal cancellation aborts the
       // request. Stop that provisional child before returning so it cannot

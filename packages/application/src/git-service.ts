@@ -1,6 +1,7 @@
+// PANYA P1 source-only Host integration; pinned MIT v5.8.7 — UNTESTED.
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
-import { ProcessManager } from '@lnwjud/process';
+import { ProcessManager, type TrustedWindowsHelper, type WindowsContainedLaunch } from '@lnwjud/process';
 import type { ManagedWriterAdmissionPort } from './writer-admission.js';
 import path from 'node:path';
 import {
@@ -37,6 +38,7 @@ export interface GitRunRequest {
 export interface GitManagedWriterOptions {
   readonly writerAdmission?: ManagedWriterAdmissionPort;
   readonly nativeContainmentRoot?: string;
+  readonly nativeHelper?: TrustedWindowsHelper;
   readonly processManager?: ProcessManager;
 }
 
@@ -137,7 +139,7 @@ export class GitService {
     });
     if (!admission.ok) return admission;
     // Only a zero-active native Windows Job receipt authorizes release.
-    const manager = this.writerOptions.processManager ?? new ProcessManager(undefined, undefined, undefined, undefined, nativeRoot);
+    const manager = this.writerOptions.processManager ?? new ProcessManager(undefined, undefined, undefined, undefined, nativeRoot, this.writerOptions.nativeHelper);
     const started = await manager.start({
       executable: 'git',
       args: [...request.args],
@@ -145,7 +147,13 @@ export class GitService {
       containmentId,
       stdinMode: 'ignore',
       timeoutMs: request.timeoutMs ?? 60_000,
-    }, signal, undefined, () => { void admission.value.releaseAfterVerifiedTermination(); });
+    }, signal, undefined, () => { void admission.value.releaseAfterVerifiedTermination(); },
+    async (launch: WindowsContainedLaunch): Promise<Result<void>> => {
+      if (admission.value.bindNativeReceipt === undefined) {
+        return err(appError('CONFLICT', 'Git native writer receipt binding is unavailable', true));
+      }
+      return admission.value.bindNativeReceipt(launch);
+    });
     if (!started.ok) return started;
     let snapshot = started.value;
     while (snapshot.state === 'running' || snapshot.state === 'starting') {

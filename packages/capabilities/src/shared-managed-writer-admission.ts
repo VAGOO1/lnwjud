@@ -1,5 +1,7 @@
+// PANYA P1 pinned MIT upstream v5.8.7 — source-only, not compiled.
 import { createHash, randomUUID } from 'node:crypto';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
+import type { WindowsContainedLaunch } from '@lnwjud/process';
 import { DurableShellTaskIndex } from './durable-shell-task-index.js';
 import { DurableShellTaskStore } from './durable-shell-task-store.js';
 
@@ -9,6 +11,7 @@ export interface ManagedWriterAdmissionLease {
   readonly id: string;
   /** Call only after the mutation completed and every spawned process was verified terminated. */
   releaseAfterVerifiedTermination(): Promise<void>;
+  bindNativeReceipt?(launch: WindowsContainedLaunch): Promise<Result<void>>;
 }
 
 /**
@@ -76,6 +79,17 @@ export class SharedManagedWriterAdmission {
     return ok({
       id,
       releaseAfterVerifiedTermination: (): Promise<void> => this.index.release(id, digest),
+      bindNativeReceipt: (launch: WindowsContainedLaunch): Promise<Result<void>> => {
+        if (input.kind !== 'contained_process' || input.nativeReceiptPath === undefined ||
+            launch.receiptPath !== input.nativeReceiptPath) {
+          return Promise.resolve(err(appError('CONFLICT', 'Writer native receipt path differs from Host reservation', true)));
+        }
+        return this.index.bindNativeReceipt(id, digest, launch.receiptPath, {
+          jobId: launch.jobId,
+          requestDigest: launch.requestDigest,
+          specSha256: launch.specSha256,
+        });
+      },
     });
   }
 }

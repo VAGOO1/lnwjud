@@ -1,7 +1,8 @@
+// PANYA P1 integration candidate; pinned MIT upstream v5.8.7, unbuilt and untested.
 import { randomUUID, createHash } from 'node:crypto';
 import { appendFile, mkdir, open, readFile, readdir, rename, rm, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { readWindowsContainmentReceipt } from '@lnwjud/process';
+import { readWindowsContainmentReceipt, type NativeReceiptExpectation } from '@lnwjud/process';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
 
 export type ActiveTaskInspection = 'active' | 'terminal' | 'missing' | 'unknown';
@@ -105,7 +106,7 @@ export class DurableShellTaskIndex {
           }
           if (marker.record.mutationKind === 'opaque_contained_process') {
             const native = marker.record.nativeReceiptPath === undefined
-              ? undefined : await readWindowsContainmentReceipt(marker.record.nativeReceiptPath);
+              ? undefined : await readWindowsContainmentReceipt(marker.record.nativeReceiptPath, marker.record.nativeReceiptExpected);
             if (native !== undefined) {
               await rm(marker.path, { force: true }).catch(() => undefined);
               continue;
@@ -159,6 +160,53 @@ export class DurableShellTaskIndex {
       });
     } catch {
       return err(appError('INTERNAL_ERROR', 'Durable task capacity could not be reserved', true));
+    }
+  }
+
+  /**
+   * Bind the exact native receipt identity to a previously-owned writer/task
+   * reservation UNDER THE SHARED INDEX LOCK, before helper spawn.
+   * Absence, mismatch or duplicate binding MUST fail closed.
+   */
+  public async bindNativeReceipt(
+    taskId: string,
+    requestDigest: string,
+    receiptPath: string,
+    expected: NativeReceiptExpectation,
+  ): Promise<Result<void>> {
+    if (!isSafeTaskId(taskId) || !/^[a-f0-9]{64}$/i.test(requestDigest) ||
+        !path.isAbsolute(receiptPath) || !isNativeExpectation(expected) ||
+        path.basename(receiptPath) !== 'containment.receipt.json' ||
+        path.basename(path.dirname(receiptPath)).toLowerCase() !== expected.jobId.toLowerCase()) {
+      return err(appError('INVALID_INPUT', 'Native receipt binding identity is invalid'));
+    }
+    try {
+      await this.ensureDirectories();
+      return await this.withLock(async () => {
+        const markerPath = this.markerPath(taskId);
+        const marker = await readMarker(markerPath);
+        if (marker === undefined || marker.taskId !== taskId || marker.requestDigest !== requestDigest ||
+            (marker.nativeReceiptPath !== undefined && marker.nativeReceiptPath !== receiptPath) ||
+            marker.nativeReceiptExpected !== undefined) {
+          return err(appError('CONFLICT', 'Native receipt reservation is missing, already bound or conflicting', true));
+        }
+        await atomicWriteJson(markerPath, {
+          ...marker,
+          nativeReceiptPath: receiptPath,
+          nativeReceiptExpected: expected,
+        });
+        const readback = await readMarker(markerPath);
+        if (!readback || !readback.nativeReceiptExpected ||
+            readback.nativeReceiptPath !== receiptPath ||
+            readback.nativeReceiptExpected.jobId !== expected.jobId ||
+            readback.nativeReceiptExpected.requestDigest !== expected.requestDigest ||
+            readback.nativeReceiptExpected.specSha256 !== expected.specSha256) {
+          return err(appError('CONFLICT', 'Native receipt reservation readback is unverified', true));
+        }
+        return ok(undefined);
+      });
+    } catch {
+      return err(appError('CONFLICT', 'Native receipt reservation persistence is unverified', true));
     }
   }
 
@@ -411,6 +459,7 @@ interface MarkerRecord {
   readonly ownerClientId?: string;
   readonly ownerWorkspaceId?: string;
   readonly nativeReceiptPath?: string;
+  readonly nativeReceiptExpected?: NativeReceiptExpectation;
   readonly reservedAt?: string;
   readonly launcherPid?: number;
   readonly launcherStartedAt?: string;
@@ -453,6 +502,9 @@ async function readMarker(filename: string): Promise<MarkerRecord | undefined> {
   if (!isRecord(value) || value.version !== 1 || typeof value.taskId !== 'string') return undefined;
   if (value.mutationKind !== undefined && value.mutationKind !== 'opaque' && value.mutationKind !== 'repository_import' && value.mutationKind !== 'opaque_uncontained' && value.mutationKind !== 'opaque_contained_process') return undefined;
   if (value.requestDigest !== null && (typeof value.requestDigest !== 'string' || !/^[a-f0-9]{64}$/i.test(value.requestDigest))) return undefined;
+  // Corrupt/forged native expectations block all reclamation; never silently
+  // downgrade a broken marker to an unbound marker.
+  if (value.nativeReceiptExpected !== undefined && !isNativeExpectation(value.nativeReceiptExpected)) return undefined;
   return {
     version: 1,
     taskId: value.taskId,
@@ -461,11 +513,19 @@ async function readMarker(filename: string): Promise<MarkerRecord | undefined> {
     ...(typeof value.ownerClientId === 'string' ? { ownerClientId: value.ownerClientId } : {}),
     ...(typeof value.ownerWorkspaceId === 'string' ? { ownerWorkspaceId: value.ownerWorkspaceId } : {}),
     ...(typeof value.nativeReceiptPath === 'string' && path.isAbsolute(value.nativeReceiptPath) ? { nativeReceiptPath: value.nativeReceiptPath } : {}),
+    ...(isNativeExpectation(value.nativeReceiptExpected) ? { nativeReceiptExpected: value.nativeReceiptExpected } : {}),
     ...(typeof value.reservedAt === 'string' ? { reservedAt: value.reservedAt } : {}),
     ...(Number.isInteger(value.launcherPid) ? { launcherPid: Number(value.launcherPid) } : {}),
     ...(typeof value.launcherStartedAt === 'string' ? { launcherStartedAt: value.launcherStartedAt } : {}),
     ...(value.legacy === true ? { legacy: true } : {}),
   };
+}
+
+function isNativeExpectation(value: unknown): value is NativeReceiptExpectation {
+  if (!isRecord(value)) return false;
+  return typeof value.jobId === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.jobId) &&
+    typeof value.requestDigest === 'string' && /^[a-f0-9]{64}$/i.test(value.requestDigest) &&
+    typeof value.specSha256 === 'string' && /^[a-f0-9]{64}$/i.test(value.specSha256);
 }
 
 async function readJson(filename: string): Promise<unknown> {

@@ -1,9 +1,11 @@
+// PANYA P1 source-only Host integration candidate; pinned MIT v5.8.7.
 import { createHash, randomUUID } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { lstat, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
+import type { TrustedWindowsHelper } from '@lnwjud/process';
 import { DurableShellTaskStore } from './durable-shell-task-store.js';
 import { windowsRepositoryImportAnchorSource } from './windows-repository-import-anchor.js';
 import { repositoryImportStageAclScript, repositoryImportStageIdentityScript, repositoryImportPublishScript, repositoryImportVerifyPublishedScript } from './repository-import-scripts.js';
@@ -66,9 +68,9 @@ export class SecureRepositoryImportRuntime {
   private readonly taskStore: DurableShellTaskStore;
   private readonly root: string;
 
-  constructor(private readonly dataPath: string) {
+  constructor(private readonly dataPath: string, nativeHelper?: TrustedWindowsHelper) {
     this.root = path.join(dataPath, 'repository-imports');
-    this.taskStore = new DurableShellTaskStore(path.join(dataPath, 'background-tasks'));
+    this.taskStore = new DurableShellTaskStore(path.join(dataPath, 'background-tasks'), { ...(nativeHelper === undefined ? {} : { nativeHelper }) });
   }
 
   async start(input: SecureRepositoryImportStart, _signal?: AbortSignal): Promise<Result<Record<string, unknown>>> {

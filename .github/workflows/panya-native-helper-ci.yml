@@ -1,0 +1,113 @@
+# PANYA isolated GitHub CI R1. No deployment, release, PR, tag, or LIVE actions.
+name: PANYA Native Helper CI R1
+on:
+  push:
+    branches:
+      - panya/native-helper-ci-r1-20261017
+
+permissions:
+  contents: read
+
+concurrency:
+  group: panya-native-helper-ci-r1
+  cancel-in-progress: false
+
+jobs:
+  native-helper:
+    if: github.repository == 'VAGOO1/lnwjud'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate exact trusted baseline
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/native-helper-ci-r1-20261017') { throw 'WRONG_BRANCH' }
+          git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
+          if ((git status --porcelain).Length -gt 0) { throw 'DIRTY_CHECKOUT' }
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Set up pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install frozen dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+      - name: Build native helper in disposable CI stage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'PANYA_LNWJUD_NATIVE_LAUNCHER_REPAIR_R1_20261017'
+          $bin = Join-Path $stage 'build\win-x64'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          dotnet publish native/windows-containment-helper/lnwjud-windows-containment-helper.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $bin
+          if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUILD_FAILED' }
+          $helper = Join-Path $bin 'lnwjud-windows-containment-helper.exe'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'NATIVE_BINARY_MISSING' }
+          $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          "PANYA_NATIVE_STAGE_TEST_ROOT=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PANYA_NATIVE_RELEASE_SHA256=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "PANYA_NATIVE_HELPER_SHA256=$sha"
+          "Native Helper executable SHA-256: $sha" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+      - name: Native tests under process-scoped Restricted PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $winps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $policy = & $winps -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command '(Get-ExecutionPolicy).ToString()'
+          if (($policy | Out-String).Trim() -ne 'Restricted') { throw 'RESTRICTED_POLICY_NOT_PROVEN' }
+          $env:PANYA_NATIVE_HELPER_TEST_GATE = 'HOST_ADMITTED_NATIVE_EXECUTION'
+          $nodeExe = (Get-Command node.exe).Source
+          $vitest = Join-Path $env:GITHUB_WORKSPACE 'node_modules\vitest\vitest.mjs'
+          if (-not (Test-Path -LiteralPath $vitest -PathType Leaf)) { throw 'VITEST_ENTRY_MISSING' }
+          $command = '& "' + $nodeExe + '" "' + $vitest + '" run tests/windows-native-helper.acceptance.test.ts --reporter=verbose'
+          & $winps -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command $command
+          if ($LASTEXITCODE -ne 0) { throw 'RESTRICTED_NATIVE_ACCEPTANCE_FAILED' }
+
+  integration-contracts:
+    if: github.repository == 'VAGOO1/lnwjud'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate exact trusted baseline
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/native-helper-ci-r1-20261017') { throw 'WRONG_BRANCH' }
+          git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Set up pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install frozen dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck integration
+        shell: pwsh
+        run: pnpm typecheck
+      - name: Native launcher static and writer contracts
+        shell: pwsh
+        run: pnpm exec vitest run tests/P1-host-integration.static-contract.test.ts tests/P1-native-writer-contract.test.ts tests/windows-contained-launch.native-contract.test.ts --reporter=verbose

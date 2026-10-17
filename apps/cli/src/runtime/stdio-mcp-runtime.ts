@@ -1,5 +1,7 @@
+// PANYA P1 source-only Host integration; pinned MIT v5.8.7 / not compiled.
 import { existsSync } from 'node:fs';
 import path from 'node:path';
+import { hostTrustedWindowsHelper, type TrustedWindowsHelper } from '@lnwjud/process';
 import { fileURLToPath } from 'node:url';
 import {
   AgentSwarmService,
@@ -155,11 +157,17 @@ export function createStdioMcpRuntime(
     globalSettingsProvider: (): EngineeringHarnessSettings => parseEngineeringHarnessSettings(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessSettings)).settings,
     workspaceOverrideProvider: (workspaceId): EngineeringHarnessWorkspaceOverride | undefined => parseEngineeringHarnessWorkspaceOverrides(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessWorkspaceOverrides))[workspaceId],
   });
+  // Packaged STDIO (Electron) may have an immutable release pin; pure Node
+  // development returns undefined, forcing Host-native launch denial.
+  const hostNativeHelper = hostTrustedWindowsHelper(
+    (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath,
+  );
   const writerAdmission = new SharedManagedWriterAdmission(path.join(dataPath, 'background-tasks'));
   const workspaceWriterLease = new SqliteWorkspaceWriterLease(path.join(dataPath, 'workspace-writer-leases.sqlite'), Date.now, writerAdmission);
   const processService = new ProcessService(workspaceRepository, {
     writerAdmission,
     nativeContainmentRoot: path.join(dataPath, 'native-managed-processes'),
+    ...(hostNativeHelper === undefined ? {} : { nativeHelper: hostNativeHelper }),
     projectService,
     profileProvider,
     defaultTimeoutMsProvider: (): number => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.processTimeoutMs), DEFAULT_PROCESS_TIMEOUT_MS, 1_000, 4 * 60 * 60_000),
@@ -182,7 +190,7 @@ export function createStdioMcpRuntime(
     recoverableDelete: (): boolean => destructivePolicyProvider().recoverableDelete,
     recoveryTrashRoot: path.join(dataPath, 'recovery-trash'),
   });
-  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git') });
+  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git'), ...(hostNativeHelper === undefined ? {} : { nativeHelper: hostNativeHelper }) });
   const workspaceQuery = new WorkspaceQueryService(workspaceRepository, pathGuard);
   const extensions = createLocalExtensionsService({
     settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
@@ -203,7 +211,8 @@ export function createStdioMcpRuntime(
     if (roots.length === 0) return [workspace.realRootPath];
     return roots;
   }, effectiveUnrestricted, options.strictAllowedRoots, () => parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
-  () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS));
+  () => parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
+  hostNativeHelper);
   const taskCancellation = new GoalTaskCancellationService([
     { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
     { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
@@ -317,7 +326,7 @@ export function createStdioMcpRuntime(
     search: new SearchService(workspaceRepository),
     workspaceIndex,
     git: gitService,
-    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath)),
+    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath, hostNativeHelper)),
     process: processService,
     codex: codexService,
     agentSwarm: agentSwarmService,
@@ -400,6 +409,7 @@ function createStdioCapabilityService(
   strictAllowedRoots?: readonly string[],
   configuredRootsProvider: () => readonly string[] = () => [],
   synchronousWaitSecondsProvider: () => number = () => DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS,
+  nativeHelper?: TrustedWindowsHelper,
 ): StdioCapabilityRuntime {
   const bridgeSizeBytes = capabilityBridgeExpectedSizeBytes();
   const ocrPath = windowsOcrHelperPath();
@@ -418,6 +428,7 @@ function createStdioCapabilityService(
     unrestricted,
     configuredRootsProvider: () => strictAllowedRoots ?? [...readCapabilityRoots(process.env.LNWJUD_CAPABILITY_ROOTS), ...configuredRootsProvider(), restrictedRoot],
     synchronousWaitSecondsProvider,
+    ...(nativeHelper === undefined ? {} : { nativeHelper }),
     ...(windows === undefined ? {} : { windows }),
   });
   return { service: runtime.service, shell: runtime.shell };

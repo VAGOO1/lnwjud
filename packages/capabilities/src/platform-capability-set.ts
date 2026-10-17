@@ -1,4 +1,6 @@
+// PANYA P1 source-only Host integration candidate; pinned MIT v5.8.7.
 import path from 'node:path';
+import type { TrustedWindowsHelper } from '@lnwjud/process';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
 import { BrowserCdpBackend } from './browser-cdp-backend.js';
 import { NodeBrowserCdpProtocol } from './browser-cdp-protocol.js';
@@ -36,6 +38,7 @@ export interface PlatformCapabilitySetOptions {
   readonly configuredRootsProvider?: () => readonly string[];
   readonly synchronousWaitSecondsProvider?: () => number;
   readonly windows?: PlatformWindowsCapabilityOptions;
+  readonly nativeHelper?: TrustedWindowsHelper;
   /** Electron-main providers whose semantics are shared by Windows/macOS/Linux. */
   readonly shared?: Partial<Record<import('./index.js').CapabilityToolName, CapabilityBackend>>;
   /** Optional integrity-bound native host for macOS/Linux desktop capabilities. */
@@ -70,6 +73,7 @@ export function createPlatformCapabilitySet(options: PlatformCapabilitySetOption
     allowedRootsProvider: capabilityRootsProvider,
     unrestricted,
     taskStateDirectory: path.join(options.dataPath, 'background-tasks'),
+    ...(options.nativeHelper === undefined ? {} : { nativeHelper: options.nativeHelper }),
     ...(options.synchronousWaitSecondsProvider === undefined ? {} : { maxSynchronousWaitSecondsProvider: options.synchronousWaitSecondsProvider }),
   });
   const browserProtocol = new NodeBrowserCdpProtocol({ platform, profileDir: path.join(options.dataPath, 'browser-profile') });
