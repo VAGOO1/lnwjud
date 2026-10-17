@@ -77,6 +77,79 @@ jobs:
           & $winps -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command $command
           if ($LASTEXITCODE -ne 0) { throw 'RESTRICTED_NATIVE_ACCEPTANCE_FAILED' }
 
+      - name: Package R3 native helper artifact and verify hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud') { throw 'R3_WRONG_REPOSITORY' }
+          if ($env:GITHUB_REF -cne 'refs/heads/panya/native-helper-ci-r1-20261017') { throw 'R3_WRONG_BRANCH' }
+          if (-not $env:RUNNER_TEMP -or -not $env:GITHUB_ENV -or -not $env:PANYA_NATIVE_STAGE_TEST_ROOT) { throw 'R3_STAGE_ENV_MISSING' }
+          $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
+          $stage = (Resolve-Path -LiteralPath $env:PANYA_NATIVE_STAGE_TEST_ROOT -ErrorAction Stop).ProviderPath
+          if (-not $stage.StartsWith(($runnerTemp.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw 'R3_STAGE_OUTSIDE_RUNNER_TEMP' }
+          $payload = Join-Path $stage 'artifact-r3'
+          if (Test-Path -LiteralPath $payload) { throw 'R3_ARTIFACT_ROOT_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $payload -ErrorAction Stop | Out-Null
+          $exeName = 'lnwjud-windows-containment-helper.exe'
+          $exeSource = Join-Path $stage ('build\win-x64\' + $exeName)
+          $licenseSource = Join-Path $env:GITHUB_WORKSPACE 'LICENSE'
+          if (-not (Test-Path -LiteralPath $exeSource -PathType Leaf) -or -not (Test-Path -LiteralPath $licenseSource -PathType Leaf)) { throw 'R3_INPUT_MISSING' }
+          $sourceSha = (Get-FileHash -LiteralPath $exeSource -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sourceSha -cne $env:PANYA_NATIVE_RELEASE_SHA256) { throw 'R3_BUILD_SHA_MISMATCH' }
+          Copy-Item -LiteralPath $exeSource -Destination $payload -ErrorAction Stop
+          Copy-Item -LiteralPath $licenseSource -Destination $payload -ErrorAction Stop
+          $exeOutput = Join-Path $payload $exeName
+          $licenseOutput = Join-Path $payload 'LICENSE'
+          $binarySha = (Get-FileHash -LiteralPath $exeOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+          $licenseSha = (Get-FileHash -LiteralPath $licenseOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($binarySha -cne $sourceSha) { throw 'R3_COPIED_BINARY_SHA_MISMATCH' }
+          if ($licenseSha -cne (Get-FileHash -LiteralPath $licenseSource -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'R3_LICENSE_SHA_MISMATCH' }
+          $metadata = [ordered]@{
+            schema = 'panya-native-helper-ci-artifact-r3/v1'
+            repository = $env:GITHUB_REPOSITORY
+            source_branch = $env:GITHUB_REF_NAME
+            source_commit_sha = $env:GITHUB_SHA
+            approved_baseline_commit = '6d489cdadaa870cbf163b55a0816784f680233a2'
+            pinned_upstream_commit = '1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b'
+            workflow_path = '.github/workflows/panya-native-helper-ci.yml'
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            runner_os = $env:RUNNER_OS
+            binary_filename = $exeName
+            binary_sha256 = $binarySha
+            license = 'MIT'
+            license_filename = 'LICENSE'
+            license_sha256 = $licenseSha
+            ci_test_context = 'Native tests completed in prior gated step under process-scoped Restricted'
+            permitted_use = 'STAGING_ONLY_NOT_FOR_LIVE_DEPLOY'
+            release_signed = $false
+            host_5090_verified = $false
+          }
+          $manifestPath = Join-Path $payload 'provenance.json'
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding utf8 -ErrorAction Stop
+          $readback = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($readback.binary_sha256 -cne $binarySha -or $readback.source_commit_sha -cne $env:GITHUB_SHA -or $readback.permitted_use -cne 'STAGING_ONLY_NOT_FOR_LIVE_DEPLOY') { throw 'R3_MANIFEST_READBACK_MISMATCH' }
+          $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sumsPath = Join-Path $payload 'SHA256SUMS.txt'
+          @(
+            "$binarySha  $exeName"
+            "$licenseSha  LICENSE"
+            "$manifestSha  provenance.json"
+          ) | Set-Content -LiteralPath $sumsPath -Encoding utf8 -ErrorAction Stop
+          if (@(Get-ChildItem -LiteralPath $payload -File -ErrorAction Stop).Count -ne 4) { throw 'R3_ARTIFACT_FILE_COUNT_MISMATCH' }
+          "PANYA_NATIVE_R3_ARTIFACT_ROOT=$payload" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "R3_HELPER_SHA256=$binarySha"
+          Write-Output "R3_PROVENANCE_SHA256=$manifestSha"
+          Write-Output "R3_ARTIFACT_FILES=4"
+
+      - name: Upload R3 isolated artifact (no deployment)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-native-helper-r3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PANYA_NATIVE_R3_ARTIFACT_ROOT }}/*
+          if-no-files-found: error
+          retention-days: 14
+
   integration-contracts:
     if: github.repository == 'VAGOO1/lnwjud'
     runs-on: windows-latest
