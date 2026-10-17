@@ -2,7 +2,7 @@
 import { execFile, spawn } from 'node:child_process';
 import { mkdir, open, readFile, readdir, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { prepareWindowsContainedLaunch, readWindowsContainmentReceipt, type TrustedWindowsHelper, type NativeReceiptExpectation } from '@lnwjud/process';
 import { promisify } from 'node:util';
 import { appError, err, ok, type GoalTaskCancellationObservation, type Result } from '@lnwjud/domain';
@@ -123,7 +123,7 @@ export class DurableShellTaskStore {
   private readonly maxConcurrentTasks: number;
   private readonly platform: NodeJS.Platform;
   private readonly activeIndex: DurableShellTaskIndex;
-  private readonly nativeHelper?: TrustedWindowsHelper;
+  private readonly nativeHelper: TrustedWindowsHelper | undefined;
 
   public constructor(private readonly rootDirectory: string, options: DurableShellTaskStoreOptions = {}) {
     this.maxConcurrentTasks = normalizeMaxConcurrentTasks(options.maxConcurrentTasks);
