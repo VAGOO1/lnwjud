@@ -1,6 +1,6 @@
 # Owner-authorized PANYA R5C diagnostic run 1. Ephemeral Windows CI only.
 # DO NOT execute the packaged Host, create installers, publish, deploy or touch 5090.
-name: PANYA R5C Root Metadata Diagnosis
+name: PANYA R5C Strict Unpacked Package Acceptance
 on:
   push:
     branches:
@@ -152,23 +152,73 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          # Upstream DebugLogger writes builder-debug.yml only when DEBUG is enabled.
+          # Do not allow potentially sensitive debug metadata in a public CI artifact.
+          Remove-Item Env:DEBUG -ErrorAction SilentlyContinue
+          Remove-Item Env:ELECTRON_BUILDER_DEBUG -ErrorAction SilentlyContinue
           pnpm --filter @lnwjud/desktop exec electron-builder --config electron-builder.yml --win --x64 --dir --publish never
           if ($LASTEXITCODE -ne 0) { throw 'R5B_UNPACKED_PACKAGING_FAILED' }
           $unpacked = 'apps/desktop/dist/installers/win-unpacked'
           if (-not (Test-Path -LiteralPath $unpacked -PathType Container)) { throw 'R5B_WIN_UNPACKED_MISSING' }
           Write-Output 'R5C_UNPACKED_PACKAGING_STEP_COMPLETED_DIAGNOSTIC_ONLY'
-      - name: R5C bounded Windows root file inventory and readback
+      - name: Gate D inventory and reject every unverified root file
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           & (Join-Path $env:GITHUB_WORKSPACE 'scripts/panya-r5c-root-inventory.ps1') -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers') -EvidenceRoot $env:R5B_STAGE
-          if ($LASTEXITCODE -ne 0) { throw 'R5C_INVENTORY_FAILED' }
-          if (-not (Test-Path -LiteralPath (Join-Path $env:R5B_STAGE 'PANYA_R5C_ROOT_INVENTORY.json') -PathType Leaf)) { throw 'R5C_INVENTORY_NOT_READ_BACK' }
-          Write-Output 'R5C_INVENTORY_ONLY_NOT_CANDIDATE_ACCEPTANCE'
-      - name: Upload read-only R5C root inventory receipt
+          # Calling a PowerShell script need not update LASTEXITCODE; never use a stale exit code.
+          $inventoryFile = Join-Path $env:R5B_STAGE 'PANYA_R5C_ROOT_INVENTORY.json'
+          if (-not (Test-Path -LiteralPath $inventoryFile -PathType Leaf)) { throw 'R5C_INVENTORY_NOT_READ_BACK' }
+          $inventory = Get-Content -LiteralPath $inventoryFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($inventory.schema -cne 'panya-r5c-root-inventory/v1' -or
+              $inventory.verdict -cne 'OBSERVED_NOT_YET_ADMITTED' -or
+              $inventory.rootFileCount -ne 0 -or
+              $inventory.rootDirectoryCount -ne 1) { throw 'R5C_UNADMITTED_ROOT_METADATA_STOP_SAFE' }
+          $rows = @($inventory.entries)
+          if ($rows.Count -ne 1 -or $rows[0].name -cne 'win-unpacked' -or
+              $rows[0].type -cne 'directory' -or $rows[0].reparsePoint -ne $false) {
+            throw 'R5C_UNEXPECTED_ROOT_DIRECTORY_STOP_SAFE'
+          }
+          Write-Output 'R5C_ROOT_GATE_PASS_ZERO_METADATA_NO_UNKNOWN_FILES'
+      - name: Gate D verify packaged R4 binary, embedded pin, manifest and readback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $unpacked = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers/win-unpacked'
+          node scripts/panya-native-host-r5b.mjs verify-package "$unpacked" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5C_PACKAGED_HELPER_MANIFEST_OR_PIN_INVALID' }
+          $evidenceFile = Join-Path $env:R5B_STAGE 'PANYA_R5B_PACKAGE_EVIDENCE.json'
+          if (-not (Test-Path -LiteralPath $evidenceFile -PathType Leaf)) { throw 'R5C_PACKAGE_EVIDENCE_ABSENT' }
+          $receipt = Get-Content -LiteralPath $evidenceFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($receipt.schema -cne 'panya-r5b-unpacked-verification/v1' -or
+              $receipt.verdict -cne 'CI_UNPACKED_PACKAGED_VERIFIED_ONLY' -or
+              $receipt.host5090Admission -ne $false -or $receipt.liveDeploy -ne $false -or
+              $receipt.candidate.helperSha256 -cne 'c07f4c28c0d2e409c8b1d01c8368ab8d1b713e76250dea9a059337e3d083557d' -or
+              $receipt.candidate.packagedPinPresent -ne $true -or
+              $receipt.candidate.packagedR4Input.r4SourceCommit -cne '98fee9ccb6a6c93c6c7e8edf7f11c7770eebd5f2') {
+            throw 'R5C_PACKAGE_RECEIPT_BINDING_INVALID'
+          }
+          Write-Output 'R5C_CI_STAGING_PACKAGED_VERIFIED_NOT_HOST_5090'
+      - name: Upload R5C root inventory proof
+        if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: panya-r5c-root-inventory-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/PANYA_R5C_ROOT_INVENTORY.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload R5C verified package receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5c-package-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/PANYA_R5B_PACKAGE_EVIDENCE.json
           if-no-files-found: error
           retention-days: 14
+      - name: Upload R5C accepted unpacked Host Candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5c-win-unpacked-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/desktop/dist/installers/win-unpacked/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
