@@ -92,7 +92,7 @@ export async function verifyR4Input(directory, expected = R5B) {
     manifest.permitted_use === 'STAGING_ONLY_NOT_FOR_LIVE_DEPLOY' &&
     manifest.release_signed === false && manifest.host_5090_verified === false,
     'PROVENANCE_IDENTITY_MISMATCH');
-  return { inputFiles: FILES.length, helperSha256: h, licenseSha256,
+  return { inputFiles: FILES.length, helperSha256: h, licenseSha256: licenseSha,
     provenanceSha256: provenanceSha, r4SourceCommit: manifest.source_commit_sha,
     r4Run: String(manifest.run_id), sourceScope: manifest.permitted_use };
 }
