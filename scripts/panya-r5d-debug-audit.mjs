@@ -21,7 +21,7 @@ const restrictedStrings = [
   /\b(?:GITHUB_TOKEN|GH_TOKEN|Authorization|Bearer|password|api[_-]?key|client[_-]?secret|private[_-]?key|ACCESS_TOKEN|refresh_token|AWS_SECRET)\b/i,
   /(?:github_pat_|gh[pousr]_|sk-proj-|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY)/i,
   /(?:C:[\\/]Users[\\/](?:ADMIN|Administrator)[\\/]|[\\/][.]ssh[\\/]|[\\/]AppData[\\/]Roaming[\\/])/i,
-  /(?:https?:\/\/[^\s/@]+:[^\s/@]+@|(?i:token|secret)=\S+)/i,
+  /(?:https?:\/\/[^\s/@]+:[^\s/@]+@|(?:token|secret)=\S+)/i,
 ];
 const SHA = /^[a-f0-9]{64}$/i;
 function check(ok, code) { if (!ok) throw new Error('R5D_' + code); }
