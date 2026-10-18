@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { appError, err, ok, type InvocationAuthorization } from '@lnwjud/domain';
 import type { Workspace, WorkspaceRepository } from '@lnwjud/workspace';
 import type { ManagedWriterAdmissionPort } from './writer-admission.js';
-import { ArtifactTransferProviderR1, type PinnedArtifact, type TrustedSource } from './artifact-transfer-provider-r1.js';
+import { ArtifactTransferProviderR1, type PinnedArtifact, type TrustedSource, type WindowsStageSealPort } from './artifact-transfer-provider-r1.js';
 
 const dirs: string[] = [];
 const AUTH: InvocationAuthorization = {
@@ -38,10 +38,18 @@ async function fixture() {
   let describe = async () => ({ ...pinned, expired: false });
   let chunks: TrustedSource['chunks'] = async function* () { streams++; yield payload; };
   const source: TrustedSource = { describe: () => describe(), chunks: signal => chunks(signal) };
-  const newProvider = () => new ArtifactTransferProviderR1({ workspaces, writer, source, pinned });
+  // Host-native binding is tested independently on actual NTFS in the Windows CI step.
+  // This is only a synthetic adapter for the platform-independent 13 regression cases.
+  const windowsStageSeal: WindowsStageSealPort = {
+    async acquire() {
+      return { nativeDirectoryIdentity: '0000000000000001-00000000000000000000000000000001',
+        async verify() { return true; }, async release() {} };
+    },
+  };
+  const newProvider = () => new ArtifactTransferProviderR1({ workspaces, writer, source, pinned, windowsStageSeal });
   const input = { workspaceId: ws.id, stagingDirectory: 'staging/ci' };
   const file = (ext: string) => path.join(root, 'staging', 'ci', 'artifact-' + pinned.artifactId + '.' + ext);
-  return { root, ws, pinned, workspaces, writer, source, newProvider, input, file,
+  return { root, ws, pinned, workspaces, writer, source, windowsStageSeal, newProvider, input, file,
     setMetadata(fn: typeof describe) { describe = fn; },
     setChunks(fn: TrustedSource['chunks']) { chunks = fn; },
     collide() { block = true; },
@@ -65,7 +73,7 @@ describe('PANYA R1 CI-only guarded artifact streaming', () => {
     const source: TrustedSource = { describe: async () => ({ ...large, expired: false }),
       chunks: async function* () { for (let i = 0; i < count; i++) yield chunk; } };
     const r = await new ArtifactTransferProviderR1({
-      workspaces: f.workspaces, writer: f.writer, source, pinned: large,
+      workspaces: f.workspaces, writer: f.writer, source, pinned: large, windowsStageSeal: f.windowsStageSeal,
     }).receive(actor, f.input, AUTH);
     expect(r).toMatchObject({ ok: true, value: { bytes: 32 * 1024 * 1024, sha256: large.sha256 } });
     expect((await lstat(f.file('zip'))).size).toBe(32 * 1024 * 1024);
@@ -151,11 +159,10 @@ describe('PANYA R1 CI-only guarded artifact streaming', () => {
     expect(await readFile(f.file('zip'), 'utf8')).toBe('existing');
     expect(f.tally().streams).toBe(0);
   });
-  it('rejects symlink staging directories on POSIX CI', async () => {
-    if (process.platform === 'win32') return;
+  it('rejects a real symlink/junction staging directory without skipping Windows', async () => {
     const f = await fixture();
     const outside = await mkdtemp(path.join(os.tmpdir(), 'panya-outside-')); dirs.push(outside);
-    await symlink(outside, path.join(f.root, 'staging', 'alias'));
+    await symlink(outside, path.join(f.root, 'staging', 'alias'), process.platform === 'win32' ? 'junction' : 'dir');
     expect(await f.newProvider().receive(actor, { ...f.input, stagingDirectory: 'staging/alias' }, AUTH))
       .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
     expect(f.tally().started).toBe(0);

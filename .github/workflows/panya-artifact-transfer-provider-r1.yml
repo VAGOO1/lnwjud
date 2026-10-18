@@ -32,6 +32,8 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/panya/artifact-transfer-provider-r1-20261018"
           git merge-base --is-ancestor 6e88fe45c03cd50d251eaf9a4a7459becfb6a396 HEAD
           test -z "$(git status --porcelain)"
+          test -f packages/application/src/artifact-transfer-windows-seal.test.ts
+          test -f packages/capabilities/src/windows-repository-import-anchor.ts
       - name: Setup Node 24
         uses: actions/setup-node@v7
         with:
@@ -50,6 +52,15 @@ jobs:
       - name: Synthetic streaming and safety regression suite
         shell: bash
         run: pnpm exec vitest run packages/application/src/artifact-transfer-provider-r1.test.ts --reporter=verbose
+      - name: Windows NTFS junction and directory-swap admission tests (no skipped Windows tests)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_OS -cne 'Windows') { throw 'PANYA_WINDOWS_NATIVE_TEST_NOT_ON_WINDOWS' }
+          pnpm exec vitest run packages/application/src/artifact-transfer-windows-seal.test.ts --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'PANYA_WINDOWS_NATIVE_STAGE_SEAL_TEST_FAILED' }
+          Write-Output 'PANYA_WINDOWS_NATIVE_REPARSE_AND_SWAP_FIXTURES_PASSED_CI_ONLY'
       - name: Final source-only boundary
         shell: bash
         run: |

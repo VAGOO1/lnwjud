@@ -29,6 +29,24 @@ export interface TrustedSource {
   describe(): Promise<ArtifactMetadata>;
   chunks(signal?: AbortSignal): AsyncIterable<Uint8Array>;
 }
+/** Windows-only Host-owned seal backed by the existing NTFS RepositoryImportAnchor.
+ * The implementation must retain reparse-rejecting directory handles, including the
+ * workspace root and the final staging parent, without FILE_SHARE_DELETE.
+ * This is an interface ONLY: CI source is not wired into any live Host.
+ */
+export interface WindowsStageSealLease {
+  readonly nativeDirectoryIdentity: string;
+  /** Fails if the native handle lifetime or exact NTFS identity is unverified. */
+  verify(): Promise<boolean>;
+  release(): Promise<void>;
+}
+export interface WindowsStageSealPort {
+  acquire(input: {
+    readonly workspaceRoot: string;
+    readonly relativeStage: string;
+    readonly destinationName: string;
+  }): Promise<WindowsStageSealLease>;
+}
 export interface ArtifactAdmissionInput { readonly workspaceId: string; readonly stagingDirectory: string }
 export interface ArtifactAdmissionReceipt {
   readonly verdict: 'VERIFIED_ARTIFACT_SOURCE_ONLY';
@@ -40,6 +58,8 @@ export interface ArtifactAdmissionDependencies {
   readonly workspaces: Pick<WorkspaceRepository, 'get'>;
   readonly writer: ManagedWriterAdmissionPort;
   readonly source: TrustedSource;
+  /** Trusted host adapter only; a caller must never supply the seal port. */
+  readonly windowsStageSeal?: WindowsStageSealPort;
   /** Immutable identity supplied by an authorized Host, not a tool request. */
   readonly pinned: PinnedArtifact;
   readonly guard?: WorkspacePathGuard;
@@ -120,6 +140,11 @@ export class ArtifactTransferProviderR1 {
       return err(appError('INVALID_INPUT', 'Invalid owner, staging path or pinned identity'));
     }
     if (signal?.aborted) return err(appError('PROCESS_TIMEOUT', 'Cancelled before transfer'));
+    // A path-only probe is never sufficient on Windows: do not create receipts,
+    // partial bytes or final files without a Host-held NTFS native anchor.
+    if (process.platform === 'win32' && this.d.windowsStageSeal === undefined) {
+      return err(appError('PERMISSION_DENIED', 'Windows native directory seal is not available; fail closed'));
+    }
     const workspace = await this.d.workspaces.get(request.workspaceId);
     if (workspace === null) return err(appError('WORKSPACE_NOT_FOUND', 'Workspace unavailable'));
     if (this.permission.decide(this.profile(), { action: 'artifact_to_staging',
@@ -138,15 +163,34 @@ export class ArtifactTransferProviderR1 {
     const lease = await this.d.writer.enter({ actorClientId: actor.clientId,
       workspaceId: workspace.id, kind: 'synchronous_mutation' });
     if (!lease.ok) return lease;
+    let nativeSeal: WindowsStageSealLease | undefined;
     let outcome: Result<ArtifactAdmissionReceipt>;
-    try { outcome = await this.transfer(workspace, request.stagingDirectory, stage, auth, signal); }
-    catch { outcome = err(appError('CONFLICT', 'Transfer outcome UNKNOWN; inspect before retry')); }
-    try { await lease.value.releaseAfterVerifiedTermination(); }
-    catch { return err(appError('CONFLICT', 'Writer release unverified; no replay')); }
-    return outcome;
+    try {
+      if (process.platform === 'win32') {
+        nativeSeal = await this.d.windowsStageSeal!.acquire({
+          workspaceRoot: workspace.realRootPath,
+          relativeStage: request.stagingDirectory,
+          destinationName: 'artifact-' + this.d.pinned.artifactId + '.zip',
+        });
+        if (!nativeSeal || !/^[A-F0-9]{16}-[A-F0-9]{32}$/.test(nativeSeal.nativeDirectoryIdentity)
+          || !(await nativeSeal.verify())) {
+          throw new Error('WINDOWS_STAGE_NATIVE_SEAL_UNVERIFIED');
+        }
+      }
+      outcome = await this.transfer(workspace, request.stagingDirectory, stage, auth, signal, nativeSeal);
+    } catch {
+      outcome = err(appError('CONFLICT', 'Native seal or transfer outcome UNKNOWN; no replay'));
+    }
+    // Release the native anchor before the writer, but always attempt both.
+    // Failure to prove either release makes the outcome UNKNOWN, never success.
+    let released = true;
+    try { await nativeSeal?.release(); } catch { released = false; }
+    try { await lease.value.releaseAfterVerifiedTermination(); } catch { released = false; }
+    return released ? outcome : err(appError('CONFLICT', 'Native seal or writer release unverified; no replay'));
   }
   private async transfer(workspace: Workspace, relative: string, stage: string,
-    auth: InvocationAuthorization, signal?: AbortSignal): Promise<Result<ArtifactAdmissionReceipt>> {
+    auth: InvocationAuthorization, signal?: AbortSignal,
+    seal?: WindowsStageSealLease): Promise<Result<ArtifactAdmissionReceipt>> {
     const pin = this.d.pinned;
     const stem = 'artifact-' + pin.artifactId;
     const file = (suffix: string) => path.join(stage, stem + '.' + suffix);
@@ -163,6 +207,9 @@ export class ArtifactTransferProviderR1 {
         return err(appError('CONFLICT', 'Destination changed during preflight'));
       }
     }
+    if (seal && !(await seal.verify())) {
+      return err(appError('CONFLICT', 'Windows NTFS seal lost before creating intent'));
+    }
     // Create-only durable intent BEFORE touching the network. Never overwrite receipts.
     await writeFile(intent, evidence(pin, 'PENDING_NO_REPLAY'), { flag: 'wx', mode: 0o600 });
     if (!(await readFile(intent, 'utf8')).includes('PENDING_NO_REPLAY')) {
@@ -170,6 +217,7 @@ export class ArtifactTransferProviderR1 {
     }
     let size = 0, published = false;
     try {
+      if (seal && !(await seal.verify())) throw new Error('WINDOWS_SEAL_LOST_BEFORE_FILE_OPEN');
       const handle = await open(part, 'wx', 0o600);
       const hash = createHash('sha256');
       try {
@@ -186,6 +234,7 @@ export class ArtifactTransferProviderR1 {
       if (signal?.aborted || size !== pin.size || hash.digest('hex') !== pin.sha256) {
         throw new Error('SIZE_OR_HASH_MISMATCH');
       }
+      if (seal && !(await seal.verify())) throw new Error('WINDOWS_SEAL_LOST_AFTER_STREAM');
       if (!samePath(await existingStage(workspace, relative), stage)) throw new Error('STAGE_CHANGED');
       const relZip = relative + '/' + path.basename(zip);
       const guardZip = await this.guard.resolveForWrite(workspace, relZip, auth);
@@ -195,8 +244,10 @@ export class ArtifactTransferProviderR1 {
       }
       const st = await lstat(part);
       if (!st.isFile() || st.isSymbolicLink() || st.size !== size) throw new Error('PART_CHANGED');
+      if (seal && !(await seal.verify())) throw new Error('WINDOWS_SEAL_LOST_BEFORE_PUBLICATION');
       await link(part, zip); // Same-volume atomic CREATE_ONLY; never rename over old data.
       published = true;
+      if (seal && !(await seal.verify())) throw new Error('WINDOWS_SEAL_LOST_AFTER_PUBLICATION');
       if ((await diskSha256(zip)) !== pin.sha256) throw new Error('DISK_READBACK_MISMATCH');
       await writeFile(verified, evidence(pin, 'VERIFIED_ARTIFACT_SOURCE_ONLY',
         { archivePath: relZip, diskSha256: pin.sha256 }), { flag: 'wx', mode: 0o600 });
