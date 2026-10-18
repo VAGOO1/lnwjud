@@ -1,0 +1,281 @@
+# Owner-authorized PANYA R5D PRIVATE debug provenance and quarantine. CI-only, no Host 5090.
+# DO NOT execute the packaged Host, create installers, publish, deploy or touch 5090.
+name: PANYA R5D Private Debug Metadata and Host Candidate
+on:
+  push:
+    branches:
+      - panya/native-host-candidate-r5d-20261018
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: panya-native-host-candidate-r5d
+  cancel-in-progress: false
+
+jobs:
+  package-candidate:
+    if: github.repository == 'VAGOO1/lnwjud' && github.event_name == 'push'
+    runs-on: windows-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout exact R5B branch without persistent credentials
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Gate A CI provenance and pinned R4 baseline
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/native-host-candidate-r5d-20261018' -or $env:RUNNER_OS -cne 'Windows') { throw 'R5B_WRONG_REPOSITORY_BRANCH_OR_RUNNER' }
+          git merge-base --is-ancestor 98fee9ccb6a6c93c6c7e8edf7f11c7770eebd5f2 HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_R4_BASELINE_NOT_ANCESTOR' }
+          if (@(git status --porcelain).Count -ne 0) { throw 'R5B_CHECKOUT_DIRTY' }
+          if (-not (Test-Path -LiteralPath 'scripts/panya-native-host-r5b.mjs') -or -not (Test-Path -LiteralPath 'tests/packaging/panya-native-host-r5b.test.js')) { throw 'R5B_SOURCE_MISSING' }
+          $pin = Get-Content -LiteralPath 'packages/process/src/native-helper-release.ts' -Raw -ErrorAction Stop
+          if (-not $pin.Contains("'c07f4c28c0d2e409c8b1d01c8368ab8d1b713e76250dea9a059337e3d083557d'")) { throw 'R5B_PIN_NOT_EXACT' }
+          if (-not $pin.Contains('hostTrustedWindowsHelper(')) { throw 'R5B_HOST_INTEGRATION_MISSING' }
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Set up pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Install Cosign for official pinned tunnel provenance
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: 'v3.1.3'
+      - name: Install frozen workspace dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+      - name: R5D test private YAML, hash pin and redaction with synthetic input
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm exec vitest run tests/packaging/panya-r5d-debug-audit.test.js --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R5D_DEBUG_NEGATIVE_TESTS_FAILED' }
+      - name: Gate D run R5B synthetic negative package tests without process launch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm exec vitest run tests/packaging/panya-native-host-r5b.test.js --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_NEGATIVE_FIXTURE_TESTS_FAILED' }
+      - name: Gate B fetch exact R4 ZIP and verify GitHub artifact identity and SHA
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:GITHUB_TOKEN -or -not $env:RUNNER_TEMP -or $env:RUNNER_OS -cne 'Windows') { throw 'R5B_READONLY_ARTIFACT_ACCESS_UNAVAILABLE' }
+          $stage = Join-Path $env:RUNNER_TEMP 'PANYA_R5B_GITHUB_STAGING_20261018'
+          if (Test-Path -LiteralPath $stage) { throw 'R5B_STAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
+          $stageInfo = Get-Item -LiteralPath $stage -Force -ErrorAction Stop
+          if (-not $stageInfo.PSIsContainer -or ($stageInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R5B_STAGE_UNSAFE' }
+          $headers = @{ Authorization = ('Bearer ' + $env:GITHUB_TOKEN); Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $api = 'https://api.github.com/repos/VAGOO1/lnwjud/actions/artifacts/12122657241'
+          $meta = Invoke-RestMethod -Method Get -Uri $api -Headers $headers -ErrorAction Stop
+          if ($meta.id -ne 12122657241 -or $meta.name -cne 'panya-native-runner-r4-39091191154-1' -or $meta.expired -ne $false -or $meta.size_in_bytes -ne 37068739 -or $meta.digest -cne 'sha256:8429233d1de90b80d44ad3ae87dd1810d4c7c67ba221ae062887acc4d67f47ec') { throw 'R5B_R4_ARTIFACT_METADATA_CHANGED' }
+          $zip = Join-Path $stage 'R4_INPUT_VERIFIED.zip'
+          Invoke-WebRequest -Method Get -Uri ($api + '/zip') -Headers $headers -OutFile $zip -ErrorAction Stop
+          if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -cne '8429233d1de90b80d44ad3ae87dd1810d4c7c67ba221ae062887acc4d67f47ec') { throw 'R5B_R4_ZIP_SHA_MISMATCH' }
+          $allowed = @('LICENSE', 'SHA256SUMS.txt', 'provenance.json', 'lnwjud-windows-containment-helper.exe')
+          $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $seen = New-Object 'System.Collections.Generic.HashSet[string]'([StringComparer]::Ordinal)
+            foreach ($entry in $archive.Entries) {
+              if (-not ($allowed -ccontains $entry.FullName) -or -not $seen.Add($entry.FullName) -or $entry.Length -gt 100000000 -or $entry.Length -le 0 -or ((($entry.ExternalAttributes -shr 16) -band 61440) -eq 40960)) { throw 'R5B_ZIP_ENTRY_UNSAFE_OR_UNEXPECTED' }
+            }
+            if ($seen.Count -ne 4) { throw 'R5B_ZIP_MEMBER_COUNT_MISMATCH' }
+          } finally { $archive.Dispose() }
+          $payload = Join-Path $stage 'r4-verified-input'
+          if (Test-Path -LiteralPath $payload) { throw 'R5B_PAYLOAD_ALREADY_EXISTS' }
+          [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $payload)
+          "R5B_STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "R5B_INPUT_ROOT=$payload" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output 'R5B_R4_ZIP_AND_FOUR_MEMBERS_SHA_VERIFIED'
+      - name: Gate B validate source, MIT license, input digest and provenance
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node scripts/panya-native-host-r5b.mjs verify-input "$env:R5B_INPUT_ROOT"
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_INPUT_RECEIPT_NOT_VERIFIED' }
+          $dst = Join-Path $env:GITHUB_WORKSPACE 'native/windows-containment-helper/bin/win-x64'
+          if (Test-Path -LiteralPath $dst) { throw 'R5B_NATIVE_RESOURCE_ROOT_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $dst -ErrorAction Stop | Out-Null
+          foreach ($file in @('LICENSE','SHA256SUMS.txt','provenance.json','lnwjud-windows-containment-helper.exe')) {
+            $source = Join-Path $env:R5B_INPUT_ROOT $file
+            $target = Join-Path $dst $file
+            Copy-Item -LiteralPath $source -Destination $target -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash) { throw 'R5B_PACKAGE_STAGE_COPY_HASH_MISMATCH' }
+          }
+          node scripts/panya-native-host-r5b.mjs verify-input "$dst"
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_STAGED_RESOURCE_NOT_TRUSTED' }
+      - name: Gate C prepare official runtime dependencies without installer scripts
+        shell: pwsh
+        env:
+          LNWJUD_COSIGN_PATH: cosign
+        run: |
+          $ErrorActionPreference = 'Stop'
+          node apps/desktop/scripts/prepare-tunnel-client.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_OFFICIAL_TUNNEL_STAGE_FAILED' }
+          node apps/desktop/scripts/prepare-runtime-tools.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_RUNTIME_TOOLS_STAGE_FAILED' }
+          node apps/desktop/scripts/prepare-ecc-runtime.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_ECC_STAGE_FAILED' }
+      - name: Gate C build required Windows OCR and secret migrator binaries in isolated CI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          dotnet publish native/windows-ocr/lnwjud-windows-ocr.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:PublishReadyToRun=true -o native/windows-ocr/bin
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path 'native/windows-ocr/bin/lnwjud-windows-ocr.exe')) { throw 'R5B_OCR_BUILD_FAILED' }
+          dotnet publish native/windows-secret-migrator/lnwjud-windows-secret-migrator.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableWindowsTargeting=true -o native/windows-secret-migrator/bin/win-x64
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_MIGRATOR_BUILD_FAILED' }
+          $dir = 'native/windows-secret-migrator/bin/win-x64'
+          $exe = Join-Path $dir 'lnwjud-windows-secret-migrator.exe'
+          if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) { throw 'R5B_MIGRATOR_BINARY_MISSING' }
+          $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          ($sha + '  lnwjud-windows-secret-migrator.exe') | Set-Content -LiteralPath (Join-Path $dir 'lnwjud-windows-secret-migrator.sha256') -Encoding ascii
+      - name: R5D capture debug file presence before workspace build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers'
+          node scripts/panya-r5d-debug-audit.mjs snapshot before-build "$root" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5D_BEFORE_BUILD_SNAPSHOT_UNVERIFIED' }
+      - name: Gate C compile Host Candidate including immutable release pin
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm build
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_WORKSPACE_BUILD_FAILED' }
+          if (-not (Test-Path 'apps/desktop/dist/main/main.js' -PathType Leaf)) { throw 'R5B_HOST_BUNDLE_MISSING' }
+          $main = Get-Content -LiteralPath 'apps/desktop/dist/main/main.js' -Raw -ErrorAction Stop
+          if (-not $main.Contains('c07f4c28c0d2e409c8b1d01c8368ab8d1b713e76250dea9a059337e3d083557d')) { throw 'R5B_COMPILED_HOST_PIN_MISSING' }
+      - name: R5D capture debug file presence after workspace build before Packaging
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers'
+          node scripts/panya-r5d-debug-audit.mjs snapshot before-package "$root" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5D_BEFORE_PACKAGE_SNAPSHOT_UNVERIFIED' }
+      - name: Gate C package Windows Electron Host as unpacked directory only
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Upstream DebugLogger writes builder-debug.yml only when DEBUG is enabled.
+          # Do not allow potentially sensitive debug metadata in a public CI artifact.
+          Remove-Item Env:DEBUG -ErrorAction SilentlyContinue
+          Remove-Item Env:ELECTRON_BUILDER_DEBUG -ErrorAction SilentlyContinue
+          pnpm --filter @lnwjud/desktop exec electron-builder --config electron-builder.yml --win --x64 --dir --publish never
+          if ($LASTEXITCODE -ne 0) { throw 'R5B_UNPACKED_PACKAGING_FAILED' }
+          $unpacked = 'apps/desktop/dist/installers/win-unpacked'
+          if (-not (Test-Path -LiteralPath $unpacked -PathType Container)) { throw 'R5B_WIN_UNPACKED_MISSING' }
+          Write-Output 'R5C_UNPACKED_PACKAGING_STEP_COMPLETED_DIAGNOSTIC_ONLY'
+      - name: R5D capture debug file presence after Electron Builder finishes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers'
+          node scripts/panya-r5d-debug-audit.mjs snapshot after-package "$root" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5D_AFTER_PACKAGE_SNAPSHOT_UNVERIFIED' }
+      - name: Gate D scan private Debug YAML and quarantine only pinned verified file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers'
+          node scripts/panya-r5d-debug-audit.mjs review none "$root" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5D_PRIVATE_YAML_SCAN_OR_QUARANTINE_STOP_SAFE' }
+          $reviewFile = Join-Path $env:R5B_STAGE 'R5D_METADATA_REVIEW.json'
+          if (-not (Test-Path -LiteralPath $reviewFile -PathType Leaf)) { throw 'R5D_REVIEW_RECEIPT_NOT_PERSISTED' }
+          $review = Get-Content -LiteralPath $reviewFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($review.verdict -cne 'SAFE_QUARANTINED_OR_ABSENT_NOT_YET_PACKAGE_ACCEPTANCE' -or
+              $review.quarantineContentsPublished -ne $false -or
+              @($review.rootEntriesAfterQuarantine).Count -ne 1 -or
+              @($review.rootEntriesAfterQuarantine)[0] -cne 'win-unpacked') {
+            throw 'R5D_REVIEW_RECEIPT_BINDING_FAILED'
+          }
+          Write-Output 'R5D_PRIVATE_METADATA_REVIEW_BOUND_AND_ROOT_QUARANTINED'
+      - name: Gate D inventory and reject every unverified root file
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & (Join-Path $env:GITHUB_WORKSPACE 'scripts/panya-r5c-root-inventory.ps1') -OutputRoot (Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers') -EvidenceRoot $env:R5B_STAGE
+          # Calling a PowerShell script need not update LASTEXITCODE; never use a stale exit code.
+          $inventoryFile = Join-Path $env:R5B_STAGE 'PANYA_R5C_ROOT_INVENTORY.json'
+          if (-not (Test-Path -LiteralPath $inventoryFile -PathType Leaf)) { throw 'R5C_INVENTORY_NOT_READ_BACK' }
+          $inventory = Get-Content -LiteralPath $inventoryFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($inventory.schema -cne 'panya-r5c-root-inventory/v1' -or
+              $inventory.verdict -cne 'OBSERVED_NOT_YET_ADMITTED' -or
+              $inventory.rootFileCount -ne 0 -or
+              $inventory.rootDirectoryCount -ne 1) { throw 'R5C_UNADMITTED_ROOT_METADATA_STOP_SAFE' }
+          $rows = @($inventory.entries)
+          if ($rows.Count -ne 1 -or $rows[0].name -cne 'win-unpacked' -or
+              $rows[0].type -cne 'directory' -or $rows[0].reparsePoint -ne $false) {
+            throw 'R5C_UNEXPECTED_ROOT_DIRECTORY_STOP_SAFE'
+          }
+          Write-Output 'R5D_ROOT_GATE_PASS_ZERO_METADATA_NO_UNKNOWN_FILES'
+      - name: Gate D verify packaged R4 binary, embedded pin, manifest and readback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $unpacked = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop/dist/installers/win-unpacked'
+          node scripts/panya-native-host-r5b.mjs verify-package "$unpacked" "$env:R5B_STAGE"
+          if ($LASTEXITCODE -ne 0) { throw 'R5C_PACKAGED_HELPER_MANIFEST_OR_PIN_INVALID' }
+          $evidenceFile = Join-Path $env:R5B_STAGE 'PANYA_R5B_PACKAGE_EVIDENCE.json'
+          if (-not (Test-Path -LiteralPath $evidenceFile -PathType Leaf)) { throw 'R5C_PACKAGE_EVIDENCE_ABSENT' }
+          $receipt = Get-Content -LiteralPath $evidenceFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($receipt.schema -cne 'panya-r5b-unpacked-verification/v1' -or
+              $receipt.verdict -cne 'CI_UNPACKED_PACKAGED_VERIFIED_ONLY' -or
+              $receipt.host5090Admission -ne $false -or $receipt.liveDeploy -ne $false -or
+              $receipt.candidate.helperSha256 -cne 'c07f4c28c0d2e409c8b1d01c8368ab8d1b713e76250dea9a059337e3d083557d' -or
+              $receipt.candidate.packagedPinPresent -ne $true -or
+              $receipt.candidate.packagedR4Input.r4SourceCommit -cne '98fee9ccb6a6c93c6c7e8edf7f11c7770eebd5f2') {
+            throw 'R5C_PACKAGE_RECEIPT_BINDING_INVALID'
+          }
+          Write-Output 'R5D_CI_STAGING_PACKAGED_VERIFIED_NOT_HOST_5090'
+      - name: Upload only sanitized R5D phase and quarantine decision receipts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5d-safe-debug-receipts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/R5D_before-build.json
+            ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/R5D_before-package.json
+            ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/R5D_after-package.json
+            ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/R5D_QUARANTINE_INTENT.json
+            ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/R5D_METADATA_REVIEW.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload R5C root inventory proof
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5d-root-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/PANYA_R5C_ROOT_INVENTORY.json
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload R5C verified package receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5d-package-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/PANYA_R5B_GITHUB_STAGING_20261018/PANYA_R5B_PACKAGE_EVIDENCE.json
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload R5C accepted unpacked Host Candidate
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-r5d-win-unpacked-${{ github.run_id }}-${{ github.run_attempt }}
+          path: apps/desktop/dist/installers/win-unpacked/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
