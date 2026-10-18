@@ -1,16 +1,18 @@
 // MIT License — Copyright (c) 2026 Adisorn (lnwjud project).
-// PANYA P1: source-only Host release pin; never populated from MCP or env.
-// UNBUILT: the release pipeline must substitute an official, verified hash
-// into the bundled TypeScript before any Native Helper execution is admitted.
+// PANYA R5B GitHub STAGING-ONLY Candidate pinned from R4 CI artifact 12122657241.
+// Not a production release signature, Live permission or Host 5090 admission.
+// This binary was verified independently against GitHub ZIP and provenance.
+// No MCP input or environment override is accepted for the release pin.
 import path from 'node:path';
 import type { TrustedWindowsHelper } from './windows-contained-launch.js';
 
 /**
- * Generated only by an independently authorized, reproducible native build.
- * An undefined pin DENIES Native Helper execution; it does not fall back to
- * WindowsPowerShell, an executable on PATH, or an uncontained process.
+ * R5B CI candidate: exact SHA-256 of the verified R4 Native Helper binary.
+ * The packaged Host must independently bind its resourcesPath and verify
+ * the executable's real hash before launch. This pin is NOT a signature,
+ * production admission or authority to bypass any Host approval/gate.
  */
-export const WINDOWS_NATIVE_HELPER_RELEASE_SHA256: string | undefined = undefined;
+export const WINDOWS_NATIVE_HELPER_RELEASE_SHA256: string | undefined = 'c07f4c28c0d2e409c8b1d01c8368ab8d1b713e76250dea9a059337e3d083557d';
 
 export function hostTrustedWindowsHelper(
   resourcesPath: string | undefined,
