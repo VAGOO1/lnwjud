@@ -1,0 +1,58 @@
+# SOURCE AND SYNTHETIC CI ONLY. NO ARTIFACT DOWNLOAD/UNPACK/INSTALL/HOST LAUNCH.
+name: PANYA Artifact Transfer Provider R1 Source CI
+on:
+  push:
+    branches:
+      - panya/artifact-transfer-provider-r1-20261018
+permissions:
+  contents: read
+concurrency:
+  group: panya-artifact-transfer-provider-r1
+  cancel-in-progress: false
+jobs:
+  synthetic:
+    if: github.repository == 'VAGOO1/lnwjud' && github.event_name == 'push'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout single experimental branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify exact owner-authorized repository and R5C baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "VAGOO1/lnwjud"
+          test "$GITHUB_REF" = "refs/heads/panya/artifact-transfer-provider-r1-20261018"
+          git merge-base --is-ancestor 6e88fe45c03cd50d251eaf9a4a7459becfb6a396 HEAD
+          test -z "$(git status --porcelain)"
+      - name: Setup Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install frozen dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck the isolated application source
+        shell: bash
+        run: pnpm exec tsc -b packages/application
+      - name: Synthetic streaming and safety regression suite
+        shell: bash
+        run: pnpm exec vitest run packages/application/src/artifact-transfer-provider-r1.test.ts --reporter=verbose
+      - name: Final source-only boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
+          echo PANYA_SOURCE_TEST_ONLY_NO_LIVE_NO_ARTIFACT_FETCH_NO_NATIVE_EXECUTION

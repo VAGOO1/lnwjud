@@ -1,3 +1,4 @@
+export * from './artifact-transfer-provider-r1.js';
 export * from './file-service.js';
 export * from './workspace-locator.js';
 export * from './checkpoint-service.js';
