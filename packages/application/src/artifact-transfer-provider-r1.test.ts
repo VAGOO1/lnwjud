@@ -122,12 +122,17 @@ describe('PANYA R1 CI-only guarded artifact streaming', () => {
   });
   it('records network interruption and refuses a second transfer', async () => {
     const f = await fixture();
-    f.setChunks(async function* () { yield payload.subarray(0, 6); throw new Error('CI synthetic network drop'); });
+    let networkStreamStarts = 0;
+    f.setChunks(async function* () {
+      networkStreamStarts += 1;
+      yield payload.subarray(0, 6);
+      throw new Error('CI synthetic network drop');
+    });
     expect(await f.newProvider().receive(actor, f.input, AUTH))
       .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
     expect(await f.newProvider().receive(actor, f.input, AUTH))
       .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
-    expect(f.tally().streams).toBe(1);
+    expect(networkStreamStarts).toBe(1);
     expect(await readFile(f.file('stop-safe.json'), 'utf8')).toContain('STOP_SAFE_NO_REPLAY');
   });
   it('stops on cancellation and does not publish a ZIP', async () => {
