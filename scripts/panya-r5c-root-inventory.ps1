@@ -8,7 +8,7 @@ param(
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_OS -cne 'Windows' -or
     $env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or
-    $env:GITHUB_REF -cne 'refs/heads/panya/native-host-candidate-r5c-20261018') {
+    $env:GITHUB_REF -cne 'refs/heads/panya/native-host-candidate-r5d-20261018') {
   throw 'R5C_NOT_APPROVED_EPHEMERAL_GITHUB_CI'
 }
 $root = (Resolve-Path -LiteralPath $OutputRoot -ErrorAction Stop).ProviderPath
