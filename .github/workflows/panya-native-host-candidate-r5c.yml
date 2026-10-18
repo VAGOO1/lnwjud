@@ -223,10 +223,20 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          # Upstream DebugLogger writes builder-debug.yml only when DEBUG is enabled.
+          # Upstream DebugLogger writes builder-debug.yml when its electron-builder namespace is enabled.
+          # This CI-only namespace denial must be applied AFTER the existing environment cleanup.
           # Do not allow potentially sensitive debug metadata in a public CI artifact.
+          foreach ($relative in @('electron-builder.env','apps/desktop/electron-builder.env')) {
+            $envFile = Join-Path $env:GITHUB_WORKSPACE $relative
+            if (Test-Path -LiteralPath $envFile) { throw 'R5C_UNADMITTED_ELECTRON_BUILDER_ENV_STOP_SAFE' }
+          }
           Remove-Item Env:DEBUG -ErrorAction SilentlyContinue
           Remove-Item Env:ELECTRON_BUILDER_DEBUG -ErrorAction SilentlyContinue
+          $env:DEBUG = '-electron-builder*'
+          if ($env:DEBUG -cne '-electron-builder*' -or (Test-Path Env:ELECTRON_BUILDER_DEBUG)) {
+            throw 'R5C_DEBUG_NAMESPACE_DENY_NOT_APPLIED'
+          }
+          Write-Output 'R5C_DEBUG_NAMESPACE_DENY_CONFIGURED_NO_ENV_VALUES_LOGGED'
           pnpm --filter @lnwjud/desktop exec electron-builder --config electron-builder.yml --win --x64 --dir --publish never
           if ($LASTEXITCODE -ne 0) { throw 'R5B_UNPACKED_PACKAGING_FAILED' }
           $unpacked = 'apps/desktop/dist/installers/win-unpacked'
