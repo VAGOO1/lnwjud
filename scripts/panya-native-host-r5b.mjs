@@ -118,7 +118,7 @@ export async function verifyUnpackedCandidate(directory, expected = R5B) {
 function requireCi() {
   need(process.env.GITHUB_ACTIONS === 'true' && process.env.RUNNER_OS === 'Windows' &&
     process.env.GITHUB_REPOSITORY === R5B.repo &&
-    process.env.GITHUB_REF === 'refs/heads/panya/native-host-candidate-r5b-20261018' &&
+    process.env.GITHUB_REF === 'refs/heads/panya/native-host-candidate-r5c-20261018' &&
     /^[a-f0-9]{40}$/i.test(process.env.GITHUB_SHA || ''), 'NOT_APPROVED_CI_CONTEXT');
 }
 async function main(args) {
