@@ -22,6 +22,7 @@ export interface CodexDiscoveryResult {
 export interface CodexInvocation {
   readonly executable: string;
   readonly args: readonly string[];
+  readonly stdinText?: string;
 }
 
 export type CodexSandboxMode = 'read-only' | 'workspace-write';
@@ -39,11 +40,11 @@ export class CodexInvocationBuilder {
     }
     const sandboxArgs = ['--sandbox', sandboxMode];
     const args = capabilities.instructionMode === 'exec-argument'
-      ? ['exec', ...sandboxArgs, instruction]
+      ? ['exec', ...sandboxArgs, '-']
       : capabilities.instructionMode === 'prompt-option'
         ? [...sandboxArgs, '--prompt', instruction]
         : [...sandboxArgs, instruction];
-    return ok({ executable, args });
+    return ok({ executable, args, ...(capabilities.instructionMode === 'exec-argument' ? { stdinText: instruction } : {}) });
   }
 }
 
@@ -55,6 +56,9 @@ export function capabilitiesFromHelp(helpText: string): CodexCapabilities {
   if (/--sandbox\b/i.test(helpText)) names.push('sandbox');
   if (/\bread-only\b/i.test(helpText)) names.push('read-only');
   if (/\bworkspace-write\b/i.test(helpText)) names.push('workspace-write');
+  for (const flag of ['json', 'ignore-user-config', 'skip-git-repo-check', 'ask-for-approval']) {
+    if (new RegExp(`--${flag}\\b`).test(helpText)) names.push(flag);
+  }
   const instructionMode = names.includes('exec')
     ? 'exec-argument'
     : names.includes('prompt-argument')

@@ -5,6 +5,29 @@ import { CodexAdapter, type CodexDiscoveryPort, type CodexProcessManagerPort } f
 import type { CodexDiscoveryResult } from './codex-capabilities.js';
 
 describe('CodexAdapter', () => {
+  it('starts an instruction probe only with verified isolation/output flags and a fixed blind prompt', async () => {
+    const calls: ManagedProcessStart[] = [];
+    let names = ['exec', 'sandbox', 'read-only', 'json', 'ignore-user-config', 'skip-git-repo-check', 'ask-for-approval'];
+    const manager: CodexProcessManagerPort = {
+      async start(spec) { calls.push(spec); return ok(processHandle()); },
+      status() { return ok(processHandle()); },
+      logs() { return ok({ entries: [], truncated: false, nextSequence: 0 }); },
+      async stop() { return ok(undefined); },
+    };
+    const discovery: CodexDiscoveryPort = {
+      async discover() { return ok(discovered()); },
+      async discoverInstructionProbe() { return ok({ ...discovered(), capabilities: { instructionMode: 'exec-argument', names } }); },
+    };
+    const adapter = new CodexAdapter(discovery, manager);
+    expect(await adapter.startInstructionProbe('C:\\sterile')).toMatchObject({ ok: true });
+    expect(calls[0]!.args).toEqual(expect.arrayContaining(['--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--ignore-user-config', '--json', '--skip-git-repo-check']));
+    expect(calls[0]!.args).not.toContain('resume');
+    expect(calls[0]!.args).not.toContain('--ephemeral');
+    expect(calls[0]!.args.join(' ')).not.toMatch(/V3\.1|PANYA|dangerously|full-auto/);
+    names = names.filter(name => name !== 'ignore-user-config');
+    expect(await adapter.startInstructionProbe('C:\\sterile')).toMatchObject({ ok: false, error: { code: 'CODEX_NOT_AVAILABLE' } });
+    expect(calls).toHaveLength(1);
+  });
   it('builds direct sandboxed executable arguments and delegates the task to ProcessManager', async () => {
     const calls: ManagedProcessStart[] = [];
     const manager: CodexProcessManagerPort = {
@@ -20,9 +43,9 @@ describe('CodexAdapter', () => {
     expect(result).toMatchObject({ ok: true, value: { processId: 'process-1' } });
     expect(calls).toEqual([{
       executable: 'C:\\tools\\codex.exe',
-      args: ['exec', '--sandbox', 'workspace-write', 'review "quoted" input'],
+      args: ['exec', '--sandbox', 'workspace-write', '-'],
       cwd: 'C:\\workspace',
-      stdinMode: 'ignore',
+      stdinText: 'review "quoted" input',
     }]);
   });
 

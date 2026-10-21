@@ -130,6 +130,17 @@ export class CodexDiscovery {
       capabilities,
     });
   }
+
+  /** Separate opt-in discovery; ordinary Codex launches keep their existing contract. */
+  public async discoverInstructionProbe(): Promise<Result<CodexDiscoveryResult>> {
+    const base = await this.discover();
+    if (!base.ok || !base.value.status.installed || !base.value.status.executablePath) return base;
+    const result = await this.runner.run(base.value.status.executablePath, ['exec', '--help']);
+    if (result.exitCode !== 0) return commandFailure(base.value.status.executablePath, '--help', result, this.platform);
+    const extra = capabilitiesFromHelp(`${result.stdout}\n${result.stderr}`);
+    const names = [...new Set([...base.value.capabilities.names, ...extra.names])];
+    return ok({ status: { ...base.value.status, capabilities: ['version', 'help', ...names] }, capabilities: { ...base.value.capabilities, names } });
+  }
 }
 
 export function formatCodexDiscoveryError(error: AppError): string {

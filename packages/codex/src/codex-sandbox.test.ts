@@ -16,7 +16,8 @@ describe('Codex sandbox capability', () => {
       ok: true,
       value: {
         executable: 'codex.exe',
-        args: ['exec', '--sandbox', 'read-only', 'review project'],
+        args: ['exec', '--sandbox', 'read-only', '-'],
+        stdinText: 'review project',
       },
     });
   });
@@ -35,7 +36,8 @@ describe('Codex sandbox capability', () => {
       ok: true,
       value: {
         executable: 'codex.exe',
-        args: ['exec', '--sandbox', 'workspace-write', 'review project'],
+        args: ['exec', '--sandbox', 'workspace-write', '-'],
+        stdinText: 'review project',
       },
     });
   });

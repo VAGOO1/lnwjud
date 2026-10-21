@@ -1,6 +1,6 @@
 import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { ok } from '@lnwjud/domain';
 import { PathExecutableResolver, ProcessManager, type ExecutableResolver, type ProcessTreeTerminator } from './index.js';
 
@@ -15,6 +15,36 @@ async function waitForState(manager: ProcessManager, processId: string, state: s
 }
 
 describe('ProcessManager', () => {
+  it('closes an explicitly empty stdin payload instead of leaving the child waiting', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({ executable: process.execPath,
+      args: ['-e', "process.stdin.resume();process.stdin.on('end',()=>process.stdout.write('empty-eof'))"],
+      cwd: process.cwd(), stdinText: '', timeoutMs: 3000 });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await waitForState(manager, started.value.processId, 'exited');
+    expect(manager.logs(started.value.processId, {})).toMatchObject({ok:true,value:{entries:[expect.objectContaining({text:'empty-eof'})]}});
+  });
+
+  it('fails closed on conflicting or oversized stdin before spawning', async () => {
+    const manager = new ProcessManager();
+    const base = {executable:process.execPath,args:[],cwd:process.cwd()};
+    expect(await manager.start({...base,stdinMode:'ignore',stdinText:'task'})).toMatchObject({ok:false,error:{code:'INVALID_INPUT'}});
+    expect(await manager.start({...base,stdinText:'ก'.repeat(350000)})).toMatchObject({ok:false,error:{code:'INVALID_INPUT'}});
+    expect(manager.list()).toHaveLength(0);
+  });
+
+  it('does not report success when the child closes its input before delivery completes', async () => {
+    const manager = new ProcessManager();
+    const started = await manager.start({executable:process.execPath,
+      args:['-e',"process.stdin.destroy();setTimeout(()=>process.exit(0),20)"],
+      cwd:process.cwd(),stdinText:'x'.repeat(1024*1024),timeoutMs:3000});
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+    await waitForState(manager,started.value.processId,'failed');
+    expect(manager.status(started.value.processId)).toMatchObject({ok:true,value:{error:'Process stdin delivery failed'}});
+  });
+
   it('captures stdout/stderr and retains a managed process handle', async () => {
     const manager = new ProcessManager();
     const started = await manager.start({
@@ -91,14 +121,17 @@ describe('ProcessManager', () => {
     await expect(manager.stop(started.value.processId)).resolves.toMatchObject({ ok: true });
   });
 
-  it('returns EXECUTABLE_NOT_FOUND without accepting an arbitrary shell command', async () => {
+  it('rejects a missing executable and releases its pre-spawn writer reservation', async () => {
+    const onVerifiedTermination = vi.fn();
     const result = await new ProcessManager().start({
       executable: 'lnwjud-executable-that-does-not-exist',
       args: ['&&', 'whoami'],
       cwd: process.cwd(),
-    });
+    }, undefined, undefined, onVerifiedTermination);
 
     expect(result).toMatchObject({ ok: false, error: { code: 'EXECUTABLE_NOT_FOUND' } });
+    // No process was spawned: a managed writer must not be reserved indefinitely.
+    expect(onVerifiedTermination).toHaveBeenCalledTimes(1);
   });
 
   it('runs a Windows command shim without shell true', async () => {

@@ -5,6 +5,7 @@ import { CodexInvocationBuilder, type CodexDiscoveryResult, type CodexInvocation
 
 export interface CodexDiscoveryPort {
   discover(): Promise<Result<CodexDiscoveryResult>>;
+  discoverInstructionProbe?(): Promise<Result<CodexDiscoveryResult>>;
 }
 
 export interface CodexProcessManagerPort {
@@ -51,11 +52,29 @@ export class CodexAdapter {
     const invocation = this.builder.build(discovered.value.status.executablePath, discovered.value.capabilities, instruction, sandboxMode);
     if (!invocation.ok) return invocation;
     if (isAborted(signal)) return cancelledCodexStart();
-    return this.processManager.start({ executable: invocation.value.executable, args: invocation.value.args, cwd, stdinMode: 'ignore' }, signal, onCreated);
+    return this.processManager.start({ executable: invocation.value.executable, args: invocation.value.args, cwd,
+      ...(invocation.value.stdinText === undefined ? { stdinMode: 'ignore' as const } : { stdinText: invocation.value.stdinText }),
+    }, signal, onCreated);
   }
 
   public statusProcess(processId: string): Result<ManagedProcess> {
     return this.processManager.status(processId);
+  }
+
+  /** Fixed, fresh instruction audit. No caller command, prompt, or privilege flags. */
+  public async startInstructionProbe(cwd: string, signal?: AbortSignal): Promise<Result<ManagedProcess>> {
+    if (isAborted(signal)) return cancelledCodexStart();
+    if (!this.discovery.discoverInstructionProbe) return err({ code: 'CODEX_NOT_AVAILABLE', message: 'Instruction-probe discovery is unsupported', recoverable: false });
+    const found = await this.discovery.discoverInstructionProbe();
+    if (!found.ok) return found;
+    const required = ['exec', 'sandbox', 'read-only', 'json', 'ignore-user-config', 'skip-git-repo-check', 'ask-for-approval'];
+    const missing = required.filter(name => !found.value.capabilities.names.includes(name));
+    if (!found.value.status.executablePath || missing.length) return err({ code: 'CODEX_NOT_AVAILABLE', message: `Instruction probe UNSUPPORTED; required CLI capabilities missing: ${missing.join(', ')}`, recoverable: false });
+    if (isAborted(signal)) return cancelledCodexStart();
+    return this.processManager.start({ executable: found.value.status.executablePath, cwd, stdinMode: 'ignore', timeoutMs: 90_000,
+      args: ['--ask-for-approval', 'never', 'exec', '--sandbox', 'read-only', '--json', '--ignore-user-config', '--skip-git-repo-check',
+        'From instructions already supplied before this prompt only, return JSON with policy_title, policy_version, workspace_permission and tool_approval_rules. Do not use any tool, read any file, delegate, or change anything. If instructions are absent, report unknown.'],
+    }, signal);
   }
 
   public logs(processId: string, query: LogQuery): Result<ProcessLogResult> {

@@ -7,6 +7,10 @@ export interface ManagedProcessStart {
   readonly timeoutMs?: number;
   /** Close stdin for non-interactive CLI children whose prompt was passed via argv. */
   readonly stdinMode?: 'ignore';
+  /** Internal one-shot UTF-8 payload; write and close stdin, never persist in argv. */
+  readonly stdinText?: string;
+  /** Internal trusted host identity for native Job Object isolation, not an RPC field. */
+  readonly containmentId?: string;
 }
 
 export interface ManagedProcess {

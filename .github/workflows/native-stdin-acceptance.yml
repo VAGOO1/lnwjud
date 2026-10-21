@@ -1,0 +1,44 @@
+name: Bounded Windows stdin acceptance
+on:
+  push:
+    branches: [codex/native-stdin-acceptance-20261021]
+permissions:
+  contents: read
+jobs:
+  native-stdin:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install locked dependencies on ephemeral runner only
+        run: pnpm install --frozen-lockfile --ignore-scripts
+      - name: Build affected packages
+        run: pnpm --filter '@lnwjud/codex...' build
+      - name: Run inert CLI and process tests without model calls
+        run: >-
+          pnpm exec vitest run
+          packages/codex/src/codex-adapter.test.ts
+          packages/codex/src/codex-sandbox.test.ts
+          packages/codex/src/codex-discovery.test.ts
+          packages/codex/src/codex-transport.test.ts
+          packages/process/src/windows-spawn.test.ts
+          packages/process/src/process-manager.test.ts
+          packages/process/src/process-manager-stdin.test.ts
+          packages/process/src/process-manager-native-containment.test.ts
+          --fileParallelism=false --reporter=json --outputFile=windows-native-result.json
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-native-evidence
+          path: |
+            windows-native-result.json
+            evidence/transport-*.json
+            packages/codex/src/transport fixture-*/contained/*/containment.receipt.json
+          if-no-files-found: ignore
