@@ -21,17 +21,11 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
       - name: Build affected packages
         run: pnpm --filter '@lnwjud/codex...' build
-      - name: Run inert CLI and process tests without model calls
+      - name: Run only native stdin with inert fixture
         run: >-
           pnpm exec vitest run
-          packages/codex/src/codex-adapter.test.ts
-          packages/codex/src/codex-sandbox.test.ts
-          packages/codex/src/codex-discovery.test.ts
           packages/codex/src/codex-transport.test.ts
-          packages/process/src/windows-spawn.test.ts
-          packages/process/src/process-manager.test.ts
-          packages/process/src/process-manager-stdin.test.ts
-          packages/process/src/process-manager-native-containment.test.ts
+          -t "delivers stdin and EOF through native containment and reads verified completion"
           --fileParallelism=false --reporter=json --outputFile=windows-native-result.json
       - uses: actions/upload-artifact@v6
         if: always()

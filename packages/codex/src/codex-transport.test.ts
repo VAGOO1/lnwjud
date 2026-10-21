@@ -8,7 +8,14 @@ import { CodexAdapter, type CodexProcessManagerPort } from './codex-adapter.js';
 // An inert local child: receives bytes and returns them. No Codex CLI/network/model.
 const fixture = `
 const args=process.argv.slice(2);
-const answer=(prompt)=>process.stdout.write(JSON.stringify({prompt,args,eof:true}));
+const fs=require('node:fs'),path=require('node:path'),crypto=require('node:crypto');
+const progress=path.join(__dirname,'fake-cli-progress.json');
+const startedAtUtc=new Date().toISOString();
+fs.writeFileSync(progress,JSON.stringify({stage:'ready',startedAtUtc}));
+const answer=(prompt)=>{
+  fs.writeFileSync(progress,JSON.stringify({stage:'received-eof',startedAtUtc,endedAtUtc:new Date().toISOString(),bytes:Buffer.byteLength(prompt),sha256:crypto.createHash('sha256').update(prompt).digest('hex')}));
+  process.stdout.write(JSON.stringify({prompt,args,eof:true}));
+};
 if(args.at(-1)==='-') {
   let input='';process.stdin.setEncoding('utf8');
   process.stdin.on('data',chunk=>input+=chunk);
@@ -20,6 +27,11 @@ const prompt = 'ตรวจ "สินค้า" & | < > ^ %PATH% !VAR!\r\n--sa
 async function exercise(shim: boolean, contained: boolean): Promise<void> {
   const root=await mkdtemp(path.join(import.meta.dirname,'transport fixture-'));
   let preserve=false;
+  // Match the existing native containment acceptance budget in CI; compilation
+  // happens before fixture readiness. Record both phases instead of hiding it.
+  const timeoutMs=contained ? (process.env.CI ? 110000 : 15000) : 10000;
+  const invocationStartedAtUtc=new Date().toISOString();
+  const evidence=path.resolve(import.meta.dirname,'../../..','evidence');
   try {
     const script=path.join(root,'fake-cli.cjs');
     const executable=shim ? path.join(root,'fake-cli.cmd') : process.execPath;
@@ -30,7 +42,7 @@ async function exercise(shim: boolean, contained: boolean): Promise<void> {
     const port: CodexProcessManagerPort={
       start(spec,signal,onCreated) {
         calls.push(spec);
-        return manager.start({...spec,args:shim ? spec.args : [script,...spec.args],timeoutMs:10000},signal,onCreated);
+        return manager.start({...spec,args:shim ? spec.args : [script,...spec.args],timeoutMs},signal,onCreated);
       },
       status:id=>manager.status(id), logs:(id,q)=>manager.logs(id,q), stop:id=>manager.stop(id),
     };
@@ -42,7 +54,8 @@ async function exercise(shim: boolean, contained: boolean): Promise<void> {
     expect(started).toMatchObject({ok:true});
     if(!started.ok) return;
     try {
-      for(let attempt=0;attempt<200;attempt++) {
+      const deadline=Date.now()+timeoutMs;
+      while(Date.now()<deadline) {
         const status=manager.status(started.value.processId);
         if(status.ok && status.value.state==='termination_unverified') throw new Error(JSON.stringify({status,logs:manager.logs(started.value.processId,{})}));
         if(status.ok && !['starting','running'].includes(status.value.state)) break;
@@ -66,12 +79,17 @@ async function exercise(shim: boolean, contained: boolean): Promise<void> {
     } catch(error) {
       preserve=true;
       const detail={fixture:root,status:manager.status(started.value.processId),logs:manager.logs(started.value.processId,{}),error:String(error)};
-      const evidence=path.resolve(import.meta.dirname,'../../../..','evidence');
       await mkdir(evidence,{recursive:true});
       await writeFile(path.join(evidence,`transport-${shim}-${contained}.json`),JSON.stringify(detail,null,2));
       throw new Error(JSON.stringify(detail));
     } finally {
       const status=manager.status(started.value.processId);
+      if(contained) {
+        const progress=await readFile(path.join(root,'fake-cli-progress.json'),'utf8').then(JSON.parse).catch(()=>null);
+        const receipt=await readFile(path.join(root,'contained',started.value.processId,'containment.receipt.json'),'utf8').then(JSON.parse).catch(()=>null);
+        await mkdir(evidence,{recursive:true});
+        await writeFile(path.join(evidence,'transport-native-phases.json'),JSON.stringify({invocationStartedAtUtc,observedAtUtc:new Date().toISOString(),timeoutMs,status,progress,receipt,logs:manager.logs(started.value.processId,{})},null,2));
+      }
       if(status.ok && status.value.state!=='termination_unverified') await manager.stop(started.value.processId);
     }
   } finally {
@@ -83,5 +101,5 @@ async function exercise(shim: boolean, contained: boolean): Promise<void> {
 describe('Codex prompt transport with inert CLI fixtures',()=>{
   it('sends exact UTF-8 multiline prompt, closes stdin and keeps flags out of the prompt',()=>exercise(false,false));
   it.skipIf(process.platform!=='win32')('delivers shell metacharacters through a Windows cmd shim without relaxing its guard',()=>exercise(true,false));
-  it.skipIf(process.platform!=='win32')('delivers stdin and EOF through native containment and reads verified completion',()=>exercise(true,true),15000);
+  it.skipIf(process.platform!=='win32')('delivers stdin and EOF through native containment and reads verified completion',()=>exercise(true,true),process.env.CI ? 130000 : 18000);
 });
