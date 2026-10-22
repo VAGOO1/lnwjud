@@ -1,0 +1,3 @@
+# Per-run state is local evidence, never a reusable approval or source input.
+/audit/*
+!/audit/negative-case-regressions.mjs

@@ -14,6 +14,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --build",
     "test": "corepack pnpm@10.15.0 -r --if-present test",
+    "test:vagoo-fixture:mock": "node --test --test-reporter=tap scripts/fixtures/vagoo-native-owned/scripts/run-native-owned-check.test.mjs scripts/fixtures/vagoo-native-owned/audit/negative-case-regressions.mjs scripts/fixtures/vagoo-native-owned/integration-checks.mjs",
     "test:version": "vitest run tests/packaging/desktop-packaging.test.ts tests/release/public-repo-hygiene.test.ts -t version-contract --exclude=.local-artifacts/** --exclude=.worktrees/** --exclude=.superpowers/** --exclude=.kilo/**",
     "test:release": "corepack pnpm@10.15.0 -r --workspace-concurrency=1 --if-present test",
     "test:acceptance": "corepack pnpm@10.15.0 --filter @lnwjud/desktop exec vitest run --config vitest.config.ts --fileParallelism=false tests/session-resilience-acceptance.test.ts tests/production-ipc-acceptance.test.ts tests/multi-workspace-concurrency-acceptance.test.ts tests/tunnel-continuity-acceptance.test.ts tests/tunnel-tool-catalog-continuity.test.ts tests/tunnel-doctor-diagnostics.test.ts",

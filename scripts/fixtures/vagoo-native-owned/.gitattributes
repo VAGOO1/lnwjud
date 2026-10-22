@@ -1,0 +1,5 @@
+# Preserve the exact source bytes covered by R2 native acceptance.
+scripts/*.mjs text eol=lf
+scripts/*.ps1 text eol=lf
+scripts/*.psm1 text eol=lf
+audit/negative-case-regressions.mjs text eol=lf
