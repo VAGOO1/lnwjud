@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, existsSync, readFileSync, unlinkSync, realpathSync, symlinkSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -68,7 +68,7 @@ function root(): string { const dir = mkdtempSync(path.join(os.tmpdir(), 'lnwjud
 function input(phase: number): unknown { return { action: 'click', tab_id: 'fixture-tab', parameters: { selector: `#phase-${phase}` }, userConfirmed: true }; }
 function plan(workspaceId: string, workspaceRoot: string, primaryWorkId = 'trusted-primary-work'): ApprovalHostPlan {
   return { primaryWorkId, clientId: 'fixture-client', sessionId: 'fixture-session', workspaceId, tabId: 'fixture-tab', pageUrl: 'https://fixture.invalid/form',
-    requestDigests: Array.from({ length: 4 }, (_, phase) => hostApprovalInputDigest('dom_cdp', { ...domCdpCapabilitySchema.parse(input(phase)), metadata: { [CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY]: path.resolve(workspaceRoot) } })) };
+    requestDigests: Array.from({ length: 4 }, (_, phase) => hostApprovalInputDigest('dom_cdp', { ...domCdpCapabilitySchema.parse(input(phase)), metadata: { [CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY]: realpathSync(workspaceRoot) } })) };
 }
 class MockWindow extends EventEmitter {
   destroyed = false;
@@ -228,12 +228,15 @@ describe('Desktop start/resume composition with mock capabilities and no listene
   });
   it('uses the same durable work across HTTP reconnect, Desktop close/reopen and stdio provider routing', async () => {
     const data = root(); const workspaceRoot = root(); const display = promptFixture();
-    const first = runtimeAt(data, display); const workspaceId = await first.ensureDefaultWorkspace(workspaceRoot); const job = plan(workspaceId, workspaceRoot);
+    const workspaceAlias = path.join(data, 'workspace-alias');
+    symlinkSync(workspaceRoot, workspaceAlias, process.platform === 'win32' ? 'junction' : 'dir');
+    const first = runtimeAt(data, display); const workspaceId = await first.ensureDefaultWorkspace(workspaceAlias); const job = plan(workspaceId, workspaceAlias);
     const handle = await controls(first)(approvalWorkChannels.start, review(first, job)) as { hostWorkId: string };
     await first.services.startMcp({ workspaceId });
     const firstOptions = fixture.options.at(-1) as McpHttpServerOptions;
     expect(firstOptions.hostMutationApprovalProvider).toBe(first.hostMutationApprovalProvider);
-    expect((await registry(firstOptions, job).invoke('dom_cdp', input(0))).isError).not.toBe(true);
+    const firstResult = await registry(firstOptions, job).invoke('dom_cdp', input(0));
+    expect(firstResult.isError, JSON.stringify(firstResult)).not.toBe(true);
     await first.services.restartMcp(); // Recreates transport with no real listener.
     const reconnected = fixture.options.at(-1) as McpHttpServerOptions;
     expect(reconnected.hostMutationApprovalProvider).toBe(first.hostMutationApprovalProvider);

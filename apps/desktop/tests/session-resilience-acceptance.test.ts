@@ -8,7 +8,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { build } from 'esbuild';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
-import { ToolRegistry, readSharedActivitySnapshot, sharedActivityLeaseDirectoryPath, type McpApplicationServices } from '@lnwjud/mcp-server';
+import { ToolRegistry, isCodexDelegationTool, readSharedActivitySnapshot, sharedActivityLeaseDirectoryPath, type McpApplicationServices } from '@lnwjud/mcp-server';
 import { USER_SETTING_KEYS, serializeToolAvailabilitySnapshot } from '@lnwjud/shared';
 import { SqliteDatabase, SqliteSettingsRepository } from '@lnwjud/storage';
 import { UpdateInstallCoordinator, type UpdateSharedActivitySnapshot } from '../src/main/update-install.js';
@@ -77,7 +77,8 @@ describe('session resilience acceptance', () => {
       await client.connect(transport);
       const tools = await client.listTools();
       expect(tools.tools.length).toBeGreaterThan(0);
-      expect(tools.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(tools.tools.some((tool) => isCodexDelegationTool(tool.name))).toBe(false);
+      expect(tools.tools.map((tool) => tool.name)).toContain('codex_rules');
       expect(tools.tools.map((tool) => tool.name)).toContain('read_file');
 
       const externalDatabase = new SqliteDatabase(path.join(dataPath, 'lnwjud.sqlite'));

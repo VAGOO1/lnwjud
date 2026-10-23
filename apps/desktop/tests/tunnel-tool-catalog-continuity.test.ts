@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { isCodexDelegationTool } from '@lnwjud/mcp-server';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createDesktopRuntime, type DesktopRuntime } from '../src/main/desktop-services.js';
 
@@ -39,7 +40,8 @@ describe('v4.11 tool catalog continuity', () => {
 
       const first = await captureCatalog(firstConnection.url, 'before-desktop-restart');
       expect(first.tools.length).toBeGreaterThan(0);
-      expect(first.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(first.tools.some((tool) => isCodexDelegationTool(tool.name))).toBe(false);
+      expect(first.tools.some((tool) => tool.name === 'codex_rules')).toBe(true);
       for (const required of ['prepare_scheduled_continuation', 'record_scheduled_continuation_receipt', 'claim_scheduled_continuation', 'get_scheduled_continuation', 'expedite_scheduled_continuation', 'run_goal', 'checkpoint_goal']) {
         expect(first.tools.some((tool) => tool.name === required), required).toBe(true);
       }

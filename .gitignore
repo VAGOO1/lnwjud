@@ -68,6 +68,7 @@ scripts/audit_*.py
 docs/
 !docs/
 docs/*
+!docs/LNWJUD_CAPABILITIES.md
 !docs/CHATGPT_LONG_SESSION.md
 !docs/USAGE_TH.md
 !docs/mcp/
