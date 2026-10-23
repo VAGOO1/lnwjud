@@ -25,7 +25,9 @@ describe('installed browser retained observations', () => {
     const portProbe = createServer();
     const cdpPort = await listen(portProbe);
     await closeServer(portProbe);
-    const browser = spawn(executable, ['--headless=new', '--enable-automation', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`, 'about:blank'], { shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: 'ignore' });
+    const browser = spawn(executable, ['--headless=new', '--enable-automation', '--no-first-run', '--no-default-browser-check', `--user-data-dir=${profile}`, `--remote-debugging-port=${cdpPort}`, 'about:blank'], { shell: false, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', 'ignore', 'pipe'] });
+    let startupStderr = '';
+    browser.stderr?.on('data', (chunk: Buffer) => { startupStderr = (startupStderr + chunk.toString('utf8')).slice(-8192); });
     const protocol = new NodeBrowserCdpProtocol({ port: cdpPort, chromeExecutable: executable });
     const channels: BrowserCdpEventChannel[] = [];
     const open = protocol.openEventChannel.bind(protocol);
@@ -40,7 +42,10 @@ describe('installed browser retained observations', () => {
     const cleanupFailures: unknown[] = [];
     let attestedTabId: string | null = null;
     try {
-      await until(async () => (await protocol.status()).ready);
+      await until(async () => {
+        if (browser.exitCode !== null || browser.signalCode !== null) throw new Error(`Browser exited before CDP startup (exit=${String(browser.exitCode)}, signal=${String(browser.signalCode)}): ${startupStderr}`);
+        return (await protocol.status()).ready;
+      });
       const first = await protocol.newTab('about:blank');
       const second = await protocol.newTab('about:blank');
       const commandLine = await protocol.request(first.id, 'Browser.getBrowserCommandLine', {});

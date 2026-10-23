@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -8,11 +8,11 @@ import type { ManagedProcess, ProcessLogResult } from '@lnwjud/process';
 import { CodexRulesProbe } from './codex-rules-probe.js';
 
 const roots: string[] = [];
-afterEach(async () => { for (const root of roots.splice(0)) { if (path.dirname(root) !== path.resolve(os.tmpdir()) || !path.basename(root).startsWith('lnwjud-rules-probe-')) throw Error('Unsafe cleanup'); await rm(root, { recursive: true, force: true }); } });
+afterEach(async () => { for (const root of roots.splice(0)) { if (path.dirname(root) !== await realpath(os.tmpdir()) || !path.basename(root).startsWith('lnwjud-rules-probe-')) throw Error('Unsafe cleanup'); await rm(root, { recursive: true, force: true }); } });
 
 describe('fresh rule-load evidence', () => {
   it.each(['valid', 'model-echo-only', 'wrong-session', 'invalid-timestamp', 'tool-call'] as const)('%s cannot confuse model output with injected instructions', async mode => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-probe-')); roots.push(root);
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-probe-'))); roots.push(root);
     const home = path.join(root, 'home'); await mkdir(home);
     const target = path.join(home, 'AGENTS.md'), content = '# Synthetic rule policy\nWorkspace work needs no repeated confirmation.\n';
     await writeFile(target, content);

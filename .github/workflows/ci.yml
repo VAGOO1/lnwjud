@@ -52,11 +52,20 @@ jobs:
         shell: bash
         run: pnpm install --frozen-lockfile
 
-      - name: Provision Chromium for MCP browser fixtures
+      - name: Provision sandboxed browser for MCP fixtures
         shell: bash
         run: |
-          pnpm --filter @lnwjud/desktop exec playwright install --with-deps chromium
-          pnpm --filter @lnwjud/desktop exec node --input-type=module -e "import { chromium } from '@playwright/test'; import { accessSync, appendFileSync } from 'node:fs'; const executable = chromium.executablePath(); accessSync(executable); appendFileSync(process.env.GITHUB_ENV, 'LNWJUD_REAL_BROWSER_TEST_EXECUTABLE=' + executable + '\n');"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            # Ubuntu AppArmor covers installed Chrome, not downloaded Chromium.
+            # Keep both browser and OS sandbox policies enabled.
+            browser=/opt/google/chrome/chrome
+            test -x "$browser"
+            "$browser" --version
+            printf 'LNWJUD_REAL_BROWSER_TEST_EXECUTABLE=%s\n' "$browser" >> "$GITHUB_ENV"
+          else
+            pnpm --filter @lnwjud/desktop exec playwright install --with-deps chromium
+            pnpm --filter @lnwjud/desktop exec node --input-type=module -e "import { chromium } from '@playwright/test'; import { accessSync, appendFileSync } from 'node:fs'; const executable = chromium.executablePath(); accessSync(executable); appendFileSync(process.env.GITHUB_ENV, 'LNWJUD_REAL_BROWSER_TEST_EXECUTABLE=' + executable + '\n');"
+          fi
 
       - name: Run version contract
         shell: bash

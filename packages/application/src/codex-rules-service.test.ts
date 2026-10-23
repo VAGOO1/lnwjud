@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
@@ -12,7 +12,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map((root) => rm(root,
 
 describe('CodexRulesService', () => {
   async function fixture(extra: ConstructorParameters<typeof CodexRulesService>[0] = {}): Promise<{ root: string; home: string; backups: string; file: string; service: CodexRulesService; apply: (owner?: string, source?: string, hash?: string, signal?: AbortSignal) => ReturnType<CodexRulesService['backupApply']>; snapshot: import('./codex-rules-service.js').CodexRulesSnapshot }> {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-')); roots.push(root);
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-'))); roots.push(root);
     const home = path.join(root, '.codex'), backups = path.join(root, 'data'), file = path.join(home, 'AGENTS.md');
     await mkdir(home); await writeFile(file, 'old');
     const service = new CodexRulesService({ codexHomeProvider: (): string => home, backupRootProvider: (): string => backups, hostIdentityProvider: (): string => 'owner@host', ...extra });
@@ -80,7 +80,7 @@ describe('CodexRulesService', () => {
     expect(await linked.inspect('client:session', 'global', approved)).toMatchObject({ ok: false });
   });
   it('consumes an approved inspection once, applies with CAS, and rolls back from a durable receipt', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-')); roots.push(root);
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-'))); roots.push(root);
     const home = path.join(root, '.codex'), backups = path.join(root, 'data'); await mkdir(home);
     await writeFile(path.join(home, 'AGENTS.md'), 'old');
     const ids = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'];
@@ -100,7 +100,7 @@ describe('CodexRulesService', () => {
   });
 
   it('rejects Full Bypass and expires inspection snapshots without a write', async () => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-')); roots.push(root);
+    const root = await realpath(await mkdtemp(path.join(os.tmpdir(), 'lnwjud-rules-'))); roots.push(root);
     const home = path.join(root, '.codex'); await mkdir(home); await writeFile(path.join(home, 'AGENTS.md'), 'old');
     let now = 0; const service = new CodexRulesService({ codexHomeProvider: (): string => home, now: (): Date => new Date(now), idFactory: (): string => '33333333-3333-4333-8333-333333333333' });
     const bypass = { ...approved, source: 'full_bypass' as const, mode: 'full_bypass' as const, bypassApplicationAuthorization: true };

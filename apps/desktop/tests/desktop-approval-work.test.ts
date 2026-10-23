@@ -68,7 +68,7 @@ function root(): string { const dir = mkdtempSync(path.join(os.tmpdir(), 'lnwjud
 function input(phase: number): unknown { return { action: 'click', tab_id: 'fixture-tab', parameters: { selector: `#phase-${phase}` }, userConfirmed: true }; }
 function plan(workspaceId: string, workspaceRoot: string, primaryWorkId = 'trusted-primary-work'): ApprovalHostPlan {
   return { primaryWorkId, clientId: 'fixture-client', sessionId: 'fixture-session', workspaceId, tabId: 'fixture-tab', pageUrl: 'https://fixture.invalid/form',
-    requestDigests: Array.from({ length: 4 }, (_, phase) => hostApprovalInputDigest('dom_cdp', { ...domCdpCapabilitySchema.parse(input(phase)), metadata: { [CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY]: realpathSync(workspaceRoot) } })) };
+    requestDigests: Array.from({ length: 4 }, (_, phase) => hostApprovalInputDigest('dom_cdp', { ...domCdpCapabilitySchema.parse(input(phase)), metadata: { [CAPABILITY_ACTIVE_WORKSPACE_ROOT_METADATA_KEY]: realpathSync.native(workspaceRoot) } })) };
 }
 class MockWindow extends EventEmitter {
   destroyed = false;
@@ -230,7 +230,8 @@ describe('Desktop start/resume composition with mock capabilities and no listene
     const data = root(); const workspaceRoot = root(); const display = promptFixture();
     const workspaceAlias = path.join(data, 'workspace-alias');
     symlinkSync(workspaceRoot, workspaceAlias, process.platform === 'win32' ? 'junction' : 'dir');
-    const first = runtimeAt(data, display); const workspaceId = await first.ensureDefaultWorkspace(workspaceAlias); const job = plan(workspaceId, workspaceAlias);
+    const first = runtimeAt(data, display); const workspaceId = await first.ensureDefaultWorkspace(workspaceAlias);
+    const job = plan(workspaceId, process.platform === 'win32' ? workspaceRoot.toLowerCase() : workspaceAlias);
     const handle = await controls(first)(approvalWorkChannels.start, review(first, job)) as { hostWorkId: string };
     await first.services.startMcp({ workspaceId });
     const firstOptions = fixture.options.at(-1) as McpHttpServerOptions;
