@@ -1,0 +1,250 @@
+import { execFile } from 'node:child_process';
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { electronExecutablePath, terminateProcessTree } from './electron-runtime.js';
+import { settleFirstRunAndOpenHome } from './first-run-helpers.js';
+import { promisify } from 'node:util';
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { isAdvertisedDeliveryState, isCodexDelegationTool, UPGRADE_TOOL_CATALOG } from '@lnwjud/mcp-server';
+import { chromium, expect, test, type Page } from '@playwright/test';
+
+const execFileAsync = promisify(execFile);
+const desktopRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const mainEntry = path.join(desktopRoot, 'dist', 'main', 'main.js');
+const electronExecutable = electronExecutablePath(desktopRoot);
+const packagedExecutable = process.env.LNWJUD_PACKAGED_EXECUTABLE;
+
+test('desktop serves the real MCP client development workflow', async () => {
+  test.setTimeout(180_000);
+  const fixtureRoot = await createFixture();
+  const fixtureRealRoot = await realpath(fixtureRoot);
+  const dataRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-mcp-client-data-'));
+  let electronProcess: ChildProcess | undefined;
+  let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | undefined;
+  let page: Page | undefined;
+  let client: Client | undefined;
+
+  try {
+    const devToolsPort = await findEphemeralPort();
+    const launchExecutable = packagedExecutable ?? electronExecutable;
+    const launchArguments = packagedExecutable === undefined
+      ? [`--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${dataRoot}`, mainEntry]
+      : [`--remote-debugging-port=${devToolsPort}`, `--user-data-dir=${dataRoot}`];
+    electronProcess = spawn(launchExecutable, launchArguments, {
+      cwd: desktopRoot,
+      detached: process.platform !== 'win32',
+      shell: false,
+      windowsHide: true,
+      env: {
+        ...process.env,
+        APPDATA: dataRoot,
+        LNWJUD_DATA_PATH: dataRoot,
+        LNWJUD_WORKSPACE: fixtureRoot,
+        LNWJUD_UNRESTRICTED: '1',
+        LNWJUD_E2E_FIXTURE: '1',
+        LNWJUD_E2E_NODE_PATH: process.execPath,
+      },
+    });
+    const stderr: string[] = [];
+    electronProcess.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk.toString()));
+
+    await waitForDevTools(devToolsPort, electronProcess, stderr);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${devToolsPort}`);
+    const context = browser.contexts()[0];
+    if (context === undefined) throw new Error('Electron did not create a browser context');
+    await expect.poll(() => context.pages().length, { timeout: 30_000 }).toBeGreaterThan(0);
+    page = context.pages()[0];
+    if (page === undefined) throw new Error('Electron did not create a renderer page');
+
+    await settleFirstRunAndOpenHome(page);
+
+    await expect(page.getByRole('heading', { name: /^(ศูนย์ควบคุม Agent|Agent Control Center)$/ })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByTestId('workspace-real-root')).toHaveText(fixtureRealRoot, { timeout: 30_000 });
+    const workspaceId = (await page.getByTestId('workspace-id').textContent())?.trim();
+    if (workspaceId === undefined || workspaceId.length === 0) throw new Error('Desktop did not expose the registered workspace ID');
+
+    await expect(page.getByTestId('mcp-status')).toHaveText(/Agent พร้อมทำงาน|Agent ready/);
+    const endpointText = (await page.getByTestId('mcp-endpoint').textContent())?.trim();
+    if (endpointText === undefined || endpointText.length === 0 || endpointText === '—') throw new Error('Desktop did not expose an MCP endpoint');
+    const endpoint = new URL(endpointText);
+    expect(endpoint.hostname).toBe('127.0.0.1');
+    expect(endpoint.pathname).toBe('/mcp');
+
+    client = new Client(
+      { name: 'lnwjud-desktop-e2e-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    await client.connect(new StreamableHTTPClientTransport(endpoint));
+    const tools = await client.listTools();
+    const expectedCoreTools = [
+      'workspace_list', 'workspace_path_preflight', 'workspace_writer_lease_acquire', 'workspace_writer_lease_status', 'workspace_writer_lease_renew', 'workspace_writer_lease_release', 'workspace_register', 'workspace_info', 'workspace_tree', 'project_snapshot',
+      'engineering_prepare_task', 'engineering_start_task', 'engineering_get_status', 'read_file', 'read_files',
+      'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git_clone_safe', 'git_clone_status', 'git_clone_cancel', 'git', 'write_file',
+      'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'list_recovery_items', 'restore_deleted_file', 'list_checkpoints', 'restore_checkpoint', 'process_start', 'process_list', 'process_status',
+      'process_logs', 'process_stop', 'project_dev', 'project_test', 'project_lint',
+      'project_typecheck', 'project_build',
+      'shell', 'dom_cdp', 'computer_use', 'accessibility', 'input_event', 'vision', 'vision_annotated_capture', 'ui_target_action', 'window', 'health',
+      'system_info', 'notification', 'file_dialog', 'clipboard', 'web_fetch',
+      'audio', 'screen_record', 'office', 'scheduler', 'wsl_exec', 'wsl_fs',
+      'skills_list', 'skills_read', 'ponytail_session', 'mcp_list', 'mcp_describe', 'mcp_call',
+      'workspace_context', 'workspace_context_continue', 'workspace_full_scan', 'workspace_full_scan_continue',
+      'workspace_snapshot', 'search_all', 'read_many_files', 'read_file_page', 'read_file_page_continue',
+      'workspace_index', 'workspace_index_status', 'workspace_index_watch', 'workspace_index_stop',
+      'session_handoff', 'verify_incremental',
+      'run_goal', 'get_goal', 'get_goal_plan', 'update_goal_plan', 'update_goal_acceptance', 'revise_goal_intent',
+      'create_context_capsule', 'get_context_capsule', 'list_context_capsules', 'context_pressure',
+      'record_delivery_receipt', 'list_delivery_receipts', 'advance_goal_iteration',
+      'checkpoint_goal', 'checkpoint_goal_engineering', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals',
+      'resource_snapshot', 'call_history', 'goal_result', 'workflow_templates', 'workflow_prepare', 'workflow_start',
+      'prepare_scheduled_continuation', 'record_scheduled_continuation_receipt', 'claim_scheduled_continuation', 'get_scheduled_continuation', 'expedite_scheduled_continuation', 'cancel_scheduled_continuation',
+    ];
+    const advertisedTools = tools.tools.map((tool) => tool.name);
+    const advertisedUpgradeTools = UPGRADE_TOOL_CATALOG
+      .filter((entry) => !isCodexDelegationTool(entry.name) && isAdvertisedDeliveryState(entry.deliveryState) && (!entry.name.startsWith('ecc_') || entry.name === 'ecc_status'))
+      .map((entry) => entry.name);
+    expect(advertisedTools).toEqual([
+      ...expectedCoreTools,
+      ...advertisedUpgradeTools.filter((name) => !name.startsWith('automation_')),
+      'tool_batch',
+      ...advertisedUpgradeTools.filter((name) => name.startsWith('automation_')),
+    ]);
+    expect(advertisedTools).toHaveLength(
+      expectedCoreTools.length
+      + advertisedUpgradeTools.length
+      + 1,
+    );
+    expect(advertisedTools.some((name) => name.startsWith('codex_'))).toBe(false);
+
+    if (process.platform === 'win32') {
+      const nativeHealth = await callTool(client, 'health', { operation: 'check_tool', tool: 'accessibility' });
+      const nativeHealthRecord = toolRecord(nativeHealth);
+      expect(nativeHealthRecord).toMatchObject({ tool: 'accessibility', available: expect.any(Boolean) });
+      if (nativeHealthRecord.available === true) {
+        const nativeWindows = await callTool(client, 'window', { operation: 'list' });
+        expect(toolRecord(nativeWindows)).toMatchObject({ windows: expect.any(Array) });
+      } else {
+        expect(nativeHealthRecord).toMatchObject({ available: false, ready: false, local: true, reason: expect.any(String) });
+      }
+    }
+
+    const info = await callTool(client, 'workspace_info', { workspaceId });
+    expect(toolRecord(info)).toMatchObject({ id: workspaceId, realRootPath: fixtureRealRoot });
+
+    const readBefore = await callTool(client, 'read_file', { workspaceId, path: 'src/app.ts' });
+    expect(toolRecord(readBefore)).toMatchObject({ content: "export const value = 'before';\n" });
+    const search = await callTool(client, 'search_text', { workspaceId, query: 'before', glob: 'src/*.ts' });
+    expect(toolRecord(search)).toMatchObject({ matches: [{ path: expect.stringContaining('src'), text: expect.stringContaining('before') }] });
+
+    // This external CDP client cannot safely approve native exact-action dialogs.
+    // Positive mutation execution is covered by integration/host-approval tests with
+    // an explicit trusted approval provider; this E2E verifies the real Desktop HTTP
+    // transport, tool catalog, read path, path boundary, Git reads, and project snapshot.
+    const secretRead = await callTool(client, 'read_file', { workspaceId, path: '.env' });
+    expect(JSON.stringify(secretRead)).toContain('hidden');
+    expect(JSON.stringify(secretRead)).not.toContain('SECRET_ACCESS_DENIED');
+    const deniedTraversal = await callTool(client, 'read_file', { workspaceId, path: '../outside.txt' });
+    expect(deniedTraversal).toMatchObject({ isError: true });
+    expect(toolRecord(deniedTraversal)).toMatchObject({ error: { code: 'PATH_OUTSIDE_WORKSPACE' } });
+
+    const gitStatus = await callTool(client, 'git_status', { workspaceId });
+    const gitEntries = toolRecord(gitStatus).entries;
+    if (!Array.isArray(gitEntries)) throw new Error('Git status did not return entries');
+    expect(gitEntries).toEqual([
+      expect.objectContaining({ path: '.env', kind: 'untracked' }),
+    ]);
+    const gitDiff = await callTool(client, 'git_diff', { workspaceId, path: 'src/app.ts' });
+    expect(toolRecord(gitDiff)).toMatchObject({ patch: '' });
+
+    const snapshot = await callTool(client, 'project_snapshot', { workspaceId });
+    expect(toolRecord(snapshot)).toMatchObject({ project: { kind: 'node' }, git: { changedFiles: 1 } });
+    expect(await readFile(path.join(fixtureRoot, 'src', 'app.ts'), 'utf8')).toContain("value = 'before'");
+
+    await client.close();
+    client = undefined;
+    const agentActions = page.locator('details.agent-actions-menu');
+    await agentActions.locator('summary').click();
+    await agentActions.getByRole('button', { name: /^(หยุด Desktop Agent|Stop Desktop Agent)$/ }).click();
+    await expect.poll(async () => (await page!.evaluate(() => window.lnwjud.getDashboard())).mcp.running, { timeout: 30_000 }).toBe(false);
+    await expect(page.getByTestId('mcp-status')).toHaveText(/Agent หยุดทำงาน|Agent stopped/, { timeout: 30_000 });
+    await browser.close();
+    browser = undefined;
+  } finally {
+    if (client !== undefined) await client.close().catch(() => undefined);
+    if (page !== undefined) await page.evaluate(() => window.lnwjud.stopMcp()).catch(() => undefined);
+    if (browser !== undefined) await browser.close().catch(() => undefined);
+    if (electronProcess !== undefined) await terminateProcessTree(electronProcess);
+    await Promise.all([removeTemporaryRoot(fixtureRoot), removeTemporaryRoot(dataRoot)]);
+  }
+});
+
+async function createFixture(): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-mcp-client-'));
+  await mkdir(path.join(root, 'src'));
+  await writeFile(path.join(root, 'src', 'app.ts'), "export const value = 'before';\n", 'utf8');
+  await writeFile(path.join(root, '.env'), 'SECRET_NOT_FOR_TOOLS=hidden\n', 'utf8');
+  await writeFile(path.join(root, 'package.json'), JSON.stringify({
+    name: 'lnwjud-desktop-flow-fixture',
+    scripts: { test: "node -e \"process.stdout.write('project-test-pass\\n')\"" },
+  }), 'utf8');
+  await writeFile(path.join(root, 'package-lock.json'), '{}', 'utf8');
+  await execFileAsync('git', ['init', '--quiet'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.email', 'lnwjud-test@example.invalid'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['config', 'user.name', 'lnwjud desktop e2e'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['add', '--', 'package.json', 'package-lock.json', 'src'], { cwd: root, windowsHide: true });
+  await execFileAsync('git', ['commit', '--quiet', '-m', 'fixture'], { cwd: root, windowsHide: true });
+  return root;
+}
+
+async function findEphemeralPort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen({ host: '127.0.0.1', port: 0 }, () => resolve());
+  });
+  const address = server.address();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error === undefined ? resolve() : reject(error));
+  });
+  if (address === null || typeof address === 'string') throw new Error('Could not allocate an ephemeral port');
+  return address.port;
+}
+
+async function waitForDevTools(port: number, electronProcess: ChildProcess, stderr: readonly string[]): Promise<void> {
+  await expect.poll(async () => {
+    if (electronProcess.exitCode !== null) throw new Error(`Electron exited with ${electronProcess.exitCode}: ${stderr.join('')}`);
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/json/version`);
+      return response.ok;
+    } catch {
+      return false;
+    }
+  }, { timeout: 15_000, intervals: [50, 100, 250] }).toBe(true);
+}
+
+async function removeTemporaryRoot(root: string): Promise<void> {
+  await expect.poll(async () => {
+    try {
+      await rm(root, { recursive: true, force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }, { timeout: 10_000, intervals: [50, 100, 250] }).toBe(true);
+}
+
+async function callTool(client: Client, name: string, args: Record<string, unknown>): Promise<unknown> {
+  return client.callTool({ name, arguments: args });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function toolRecord(value: unknown): Record<string, unknown> {
+  if (!isRecord(value) || !isRecord(value.structuredContent)) throw new Error('MCP response did not include structured content');
+  return value.structuredContent;
+}

@@ -1,0 +1,31 @@
+name: Reject External Pull Requests
+
+on:
+  pull_request_target:
+    types: [opened, reopened, ready_for_review]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: reject-external-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  reject-external:
+    if: ${{ !contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Close and lock pull request from outside collaborator
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPOSITORY" --body "Thanks for the contribution. This repository does not accept unsolicited external pull requests; the maintainers will implement requested changes directly."
+          gh pr close "$PR_NUMBER" --repo "$REPOSITORY"
+          gh api -X PUT "repos/$REPOSITORY/issues/$PR_NUMBER/lock" -f lock_reason=off-topic

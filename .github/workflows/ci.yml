@@ -1,0 +1,836 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+      - 'ci/r6-a4d9949'
+      - 'release/v*'
+  pull_request:
+    branches: [ main, dev ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-platform-contract:
+    name: Native Platform Contract (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+          - name: macOS
+            os: macos-15
+          - name: Linux
+            os: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Provision Chromium for MCP browser fixtures
+        shell: bash
+        run: |
+          pnpm --filter @lnwjud/desktop exec playwright install --with-deps chromium
+          pnpm --filter @lnwjud/desktop exec node --input-type=module -e "import { chromium } from '@playwright/test'; import { accessSync, appendFileSync } from 'node:fs'; const executable = chromium.executablePath(); accessSync(executable); appendFileSync(process.env.GITHUB_ENV, 'LNWJUD_REAL_BROWSER_TEST_EXECUTABLE=' + executable + '\n');"
+
+      - name: Run version contract
+        shell: bash
+        run: pnpm test:version
+
+      - name: Run portable typecheck
+        shell: bash
+        run: pnpm typecheck
+
+      - name: Install ripgrep for native search acceptance (Windows)
+        if: matrix.name == 'Windows'
+        shell: powershell
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            $rgDir = Join-Path $env:RUNNER_TEMP 'ripgrep-native-contract'
+            New-Item -ItemType Directory -Force -Path $rgDir | Out-Null
+            $zip = Join-Path $rgDir 'ripgrep.zip'
+            Invoke-WebRequest -Uri 'https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-pc-windows-msvc.zip' -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $rgDir -Force
+            $rgExe = (Get-ChildItem -Path $rgDir -Filter 'rg.exe' -Recurse | Select-Object -First 1).FullName
+            Copy-Item -LiteralPath $rgExe -Destination (Join-Path $rgDir 'rg.exe') -Force
+            $rgDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:PATH = "$rgDir;$env:PATH"
+          }
+          rg --version
+
+      - name: Install ripgrep for native search acceptance (macOS/Linux)
+        if: matrix.name != 'Windows'
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            if [[ "$RUNNER_OS" == "macOS" ]]; then
+              brew install ripgrep
+            else
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends ripgrep
+            fi
+          fi
+          rg --version
+
+      - name: Run native platform contract tests
+        shell: bash
+        run: pnpm exec vitest run tests/integration/platform-composition.test.ts tests/integration/cross-platform-release-scenarios.test.ts tests/release/platform-support-contract.test.ts packages/mcp-server/src/tool-runtime-contract.test.ts
+
+      - name: Run complete native unit and service acceptance suites
+        shell: bash
+        # The desktop suite runs in isolated shards below. Keep the remaining
+        # workspace packages on pnpm's normal bounded recursive pool.
+        run: pnpm -r --workspace-concurrency=2 --filter '!@lnwjud/desktop' --if-present test
+
+      - name: Test macOS native host protocol
+        timeout-minutes: 10
+        if: matrix.name == 'macOS'
+        shell: bash
+        run: swift test --package-path native/macos-host
+
+      - name: Test Linux native host protocol
+        if: matrix.name == 'Linux'
+        shell: bash
+        run: cargo test --manifest-path native/linux-host/Cargo.toml --locked
+
+      - name: Test Linux artifact verifier with package fixtures
+        if: matrix.name == 'Linux'
+        shell: bash
+        run: bash tests/packaging/linux-release-layout.sh
+
+  desktop-test-shards:
+    name: Desktop Test Shard (${{ matrix.name }}, ${{ matrix.shard_index }}/${{ matrix.shard_total }})
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      max-parallel: 6
+      matrix:
+        include:
+          - name: Windows
+            os: windows-latest
+            shard_index: 1
+            shard_total: 2
+          - name: Windows
+            os: windows-latest
+            shard_index: 2
+            shard_total: 2
+          - name: macOS
+            os: macos-15
+            shard_index: 1
+            shard_total: 2
+          - name: macOS
+            os: macos-15
+            shard_index: 2
+            shard_total: 2
+          - name: Linux
+            os: ubuntu-24.04
+            shard_index: 1
+            shard_total: 2
+          - name: Linux
+            os: ubuntu-24.04
+            shard_index: 2
+            shard_total: 2
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace packages used by desktop acceptance tests
+        shell: bash
+        run: pnpm --filter '@lnwjud/cli...' build
+
+      - name: Run isolated desktop test shard
+        shell: bash
+        run: pnpm --filter @lnwjud/desktop exec vitest run --config vitest.config.ts --passWithNoTests --shard=${{ matrix.shard_index }}/${{ matrix.shard_total }}
+
+  native-package-verification:
+    name: Native Package Verification (${{ matrix.name }})
+    timeout-minutes: 45
+    # Build target-native artifacts alongside the test matrix on main. The
+    # release workflow accepts artifacts only from a successful exact-SHA CI
+    # run, so test failures still prevent publication.
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            os: macos-15
+            platform: darwin
+            arch: arm64
+          - name: macOS x64
+            os: macos-15-intel
+            platform: darwin
+            arch: x64
+          - name: Linux x64
+            os: ubuntu-24.04
+            platform: linux
+            arch: x64
+          - name: Linux arm64
+            os: ubuntu-24.04-arm
+            platform: linux
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Install cosign for tunnel provenance verification
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Linux packaging and Electron smoke prerequisites
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gnome-keyring libsecret-1-0 dbus dbus-x11 xvfb xauth ripgrep \
+            libnss3 libasound2t64 libgtk-3-0t64 libgbm1 libxss1 \
+            libatk-bridge2.0-0t64 libdrm2 libxkbcommon0
+
+      - name: Install ripgrep for macOS package verification
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          if ! command -v rg >/dev/null 2>&1; then
+            brew install ripgrep
+          fi
+          rg --version
+
+      - name: Install native ARM64 Debian packager
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          sudo apt-get install -y --no-install-recommends ruby ruby-dev build-essential
+          sudo gem install fpm --version 1.16.0 --no-document
+          fpm --version
+
+      - name: Build and verify target-native package
+        # Bundled FPM contains x86 Ruby; ARM runners need their native Ruby.
+        shell: bash
+        env:
+          LNWJUD_VERIFY_PLATFORM: ${{ matrix.platform }}
+          LNWJUD_VERIFY_ARCH: ${{ matrix.arch }}
+          LNWJUD_COSIGN_PATH: cosign
+          MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+          MACOS_CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # Developer ID signing must be stable across macOS releases. Never
+          # silently fall back to ad-hoc when half a certificate pair is set.
+          if [[ "$LNWJUD_VERIFY_PLATFORM" == darwin ]]; then
+            if [[ -n "$MACOS_CSC_LINK" || -n "$MACOS_CSC_KEY_PASSWORD" ]]; then
+              if [[ -z "$MACOS_CSC_LINK" || -z "$MACOS_CSC_KEY_PASSWORD" ]]; then
+                echo 'macOS signing needs both MACOS_CSC_LINK and MACOS_CSC_KEY_PASSWORD' >&2
+                exit 1
+              fi
+              export CSC_LINK="$MACOS_CSC_LINK"
+              export CSC_KEY_PASSWORD="$MACOS_CSC_KEY_PASSWORD"
+              export LNWJUD_REQUIRE_CODESIGN=1
+              echo 'LNWJUD_REQUIRE_CODESIGN=1' >> "$GITHUB_ENV"
+            fi
+          fi
+          # app-builder checks presence, not truthiness: even an empty value
+          # selects system FPM, so leave it completely unset on other targets.
+          if [[ "$LNWJUD_VERIFY_PLATFORM/$LNWJUD_VERIFY_ARCH" == linux/arm64 ]]; then
+            export USE_SYSTEM_FPM=true
+          else
+            unset USE_SYSTEM_FPM
+          fi
+          mkdir -p apps/desktop/packaged-e2e-diagnostics
+          pnpm verify:platform -- --package 2>&1 \
+            | tee apps/desktop/packaged-e2e-diagnostics/platform-package.log
+
+      - name: Verify packaged artifact layout
+        shell: bash
+        env:
+          LNWJUD_VERIFY_PLATFORM: ${{ matrix.platform }}
+          LNWJUD_VERIFY_ARCH: ${{ matrix.arch }}
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [[ "${{ matrix.platform }}" == "darwin" ]]; then
+            pnpm verify:macos-release "apps/desktop/dist/installers/lnwjud-${version}-${{ matrix.arch }}.dmg"
+            pnpm verify:macos-release "apps/desktop/dist/installers/lnwjud-${version}-${{ matrix.arch }}.zip"
+          else
+            pnpm verify:linux-release "apps/desktop/dist/installers/lnwjud-${version}-${{ matrix.arch }}.AppImage"
+            pnpm verify:linux-release "apps/desktop/dist/installers/lnwjud-${version}-${{ matrix.arch }}.deb"
+          fi
+
+      - name: Stage and launch the real macOS DMG package
+        if: matrix.platform == 'darwin'
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          installed_app="$RUNNER_TEMP/lnwjud-installed-${{ matrix.arch }}/lnwjud.app"
+          bash scripts/stage-macos-smoke-app.sh \
+            "apps/desktop/dist/installers/lnwjud-${version}-${{ matrix.arch }}.dmg" \
+            "$installed_app"
+          echo "LNWJUD_STAGED_MACOS_EXECUTABLE=$installed_app/Contents/MacOS/lnwjud" >> "$GITHUB_ENV"
+
+      - name: Run native packaged Electron E2E smoke
+        shell: bash
+        timeout-minutes: 10
+        env:
+          TARGET_PLATFORM: ${{ matrix.platform }}
+          TARGET_ARCH: ${{ matrix.arch }}
+          DEBUG: pw:browser*
+          PLAYWRIGHT_HTML_OPEN: never
+        run: |
+          set -euo pipefail
+          if [[ "$TARGET_PLATFORM" == darwin ]]; then
+            test -n "${LNWJUD_STAGED_MACOS_EXECUTABLE:-}"
+            export LNWJUD_PACKAGED_EXECUTABLE="$LNWJUD_STAGED_MACOS_EXECUTABLE"
+          else
+            case "$TARGET_PLATFORM/$TARGET_ARCH" in
+              linux/x64) relative='linux-unpacked/lnwjud' ;;
+              linux/arm64) relative='linux-arm64-unpacked/lnwjud' ;;
+              *) echo 'Unsupported native smoke target' >&2; exit 1 ;;
+            esac
+            export LNWJUD_PACKAGED_EXECUTABLE="$GITHUB_WORKSPACE/apps/desktop/dist/installers/$relative"
+          fi
+          if [[ "$TARGET_PLATFORM" == linux ]]; then
+            # Install the real DEB on this disposable runner. Its post-install
+            # hook configures the supported AppArmor/userns or SUID sandbox.
+            # A generic unshare probe does not prove Electron can use userns.
+            version="$(node -p "require('./package.json').version")"
+            sudo apt-get install -y "$GITHUB_WORKSPACE/apps/desktop/dist/installers/lnwjud-${version}-${TARGET_ARCH}.deb"
+            export LNWJUD_PACKAGED_EXECUTABLE=/opt/lnwjud/lnwjud
+          fi
+          test -f "$LNWJUD_PACKAGED_EXECUTABLE" && test -x "$LNWJUD_PACKAGED_EXECUTABLE"
+          test "$(id -u)" -ne 0
+          cd "$GITHUB_WORKSPACE/apps/desktop"
+          mkdir -p packaged-e2e-diagnostics
+          printf '%s\n' "$LNWJUD_PACKAGED_EXECUTABLE" > packaged-e2e-diagnostics/executable.txt
+          # Execute the installed Linux package or sealed macOS app just built.
+          smoke=(node node_modules/@playwright/test/cli.js test --config playwright.config.ts
+            desktop-dashboard.e2e.ts desktop-mcp-client.e2e.ts tools-doctor.e2e.ts electron-security.e2e.ts
+            --trace=retain-on-failure --reporter=list,html)
+          if [[ "$TARGET_PLATFORM" == linux ]]; then
+            # Record installed sandbox state without altering the artifact or
+            # disabling sandboxing. The Electron security test asserts that
+            # the actual renderer remains sandboxed.
+            sandbox="$(dirname "$LNWJUD_PACKAGED_EXECUTABLE")/chrome-sandbox"
+            test -f "$sandbox" && test ! -L "$sandbox"
+            stat -c '%a %u:%g %n' "$sandbox" | tee packaged-e2e-diagnostics/sandbox.txt
+            dpkg-query -W lnwjud | tee -a packaged-e2e-diagnostics/sandbox.txt
+            if [[ -f /etc/apparmor.d/lnwjud ]]; then
+              cat /etc/apparmor.d/lnwjud >> packaged-e2e-diagnostics/sandbox.txt
+            fi
+            umask 077
+            session_root="$(mktemp -d "$RUNNER_TEMP/lnwjud-keyring.XXXXXXXX")"
+            trap 'case "$session_root" in "$RUNNER_TEMP"/lnwjud-keyring.?*) rm -rf -- "$session_root" ;; esac' EXIT
+            export XDG_DATA_HOME="$session_root/data" XDG_CONFIG_HOME="$session_root/config"
+            export XDG_CACHE_HOME="$session_root/cache" XDG_RUNTIME_DIR="$session_root/runtime"
+            export XDG_CURRENT_DESKTOP=GNOME
+            mkdir -p "$XDG_DATA_HOME" "$XDG_CONFIG_HOME" "$XDG_CACHE_HOME" "$XDG_RUNTIME_DIR"
+            dbus-run-session -- xvfb-run -a bash -euo pipefail -c '
+              password="$(node -e "process.stdout.write(require(\"node:crypto\").randomBytes(32).toString(\"hex\"))")"
+              printf "%s" "$password" | gnome-keyring-daemon --unlock --components=secrets
+              unset password
+              exec "$@"
+            ' bash "${smoke[@]}" 2>&1 | tee packaged-e2e-diagnostics/run.log
+          else
+            "${smoke[@]}" 2>&1 | tee packaged-e2e-diagnostics/run.log
+          fi
+
+      - name: Upload native package and E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-e2e-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            apps/desktop/test-results/
+            apps/desktop/playwright-report/
+            apps/desktop/packaged-e2e-diagnostics/
+            apps/desktop/build/platform-verification-${{ matrix.platform }}-${{ matrix.arch }}.json
+            apps/desktop/build/packaged-runtime-evidence.json
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload verified native package evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: native-${{ matrix.platform }}-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            apps/desktop/dist/installers/*
+            apps/desktop/build/platform-verification-${{ matrix.platform }}-${{ matrix.arch }}.json
+            apps/desktop/build/packaged-runtime-evidence.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+
+  macos-26-package-compatibility:
+    name: macOS 26 Package Compatibility (${{ matrix.arch }})
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    needs: native-package-verification
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-26
+            arch: arm64
+          - os: macos-26-intel
+            arch: x64
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        shell: bash
+        run: pnpm install --frozen-lockfile
+
+      - name: Download exact macOS 15 package artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: native-darwin-${{ matrix.arch }}-${{ github.sha }}
+          path: macos26-artifact
+
+      - name: Build packaged-smoke workspace dependencies
+        shell: bash
+        run: pnpm --filter @lnwjud/storage... --if-present build
+
+      - name: Record exact v4.62.1 macOS signing-policy regression
+        if: matrix.arch == 'arm64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p macos26-diagnostics "$RUNNER_TEMP/lnwjud-v4.62.1-baseline"
+          sw_vers > macos26-diagnostics/os.txt
+          uname -a >> macos26-diagnostics/os.txt
+          baseline_directory="$RUNNER_TEMP/lnwjud-v4.62.1-baseline"
+          baseline_dmg="$baseline_directory/lnwjud-4.62.1-arm64.dmg"
+          baseline_zip="$baseline_directory/lnwjud-4.62.1-arm64.zip"
+          curl --fail --location --retry 3 \
+            --output "$baseline_dmg" \
+            https://github.com/engasnm111/lnwjud/releases/download/v4.62.1/lnwjud-4.62.1-arm64.dmg
+          curl --fail --location --retry 3 \
+            --output "$baseline_zip" \
+            https://github.com/engasnm111/lnwjud/releases/download/v4.62.1/lnwjud-4.62.1-arm64.zip
+          printf '%s  %s\n%s  %s\n' \
+            d9cf74be1711a123fde49fc070c6fe055bf2c65bf6345395d4c8fa3816bed12c "$baseline_dmg" \
+            cf982b59a42c0ee6f91186212a03a683634e6c14675a718ddbdbf6fe1ba00db8 "$baseline_zip" \
+            | shasum -a 256 -c -
+          for format in dmg zip; do
+            baseline_variable="baseline_${format}"
+            baseline="${!baseline_variable}"
+            baseline_app="$RUNNER_TEMP/lnwjud-v4.62.1-${format}-policy-app/lnwjud.app"
+            bash scripts/stage-macos-smoke-app.sh "$baseline" "$baseline_app" stage-only
+            set +e
+            node apps/desktop/scripts/inspect-macos-signing-policy.mjs \
+              --app "$baseline_app" --arch arm64 \
+              > "macos26-diagnostics/v4.62.1-${format}-signing-policy.log" 2>&1
+            policy_status="$?"
+            set -e
+            if [[ "$policy_status" -eq 0 ]]; then
+              echo "v4.62.1 unexpectedly satisfies the fixed macOS signing policy: $format" >&2
+              exit 1
+            fi
+            if ! grep -Fq 'lacks disable-library-validation' "macos26-diagnostics/v4.62.1-${format}-signing-policy.log"; then
+              cat "macos26-diagnostics/v4.62.1-${format}-signing-policy.log" >&2
+              echo "v4.62.1 $format failed policy inspection for an unexpected reason" >&2
+              exit 1
+            fi
+            echo "Confirmed v4.62.1 $format lacks disable-library-validation"
+
+            # Runtime enforcement differs between hosted runner builds and the
+            # reporter's macOS 26.6.2 (25G83). Record, but do not predicate the
+            # static signing-policy regression on, whether this runner launches it.
+            set +e
+            bash scripts/stage-macos-smoke-app.sh \
+              "$baseline" "$RUNNER_TEMP/lnwjud-v4.62.1-${format}-launch-app/lnwjud.app" \
+              2>&1 | tee "macos26-diagnostics/v4.62.1-${format}-launch-observation.log"
+            launch_status="${PIPESTATUS[0]}"
+            set -e
+            echo "v4.62.1 $format baseline launch observation: exit $launch_status" \
+              | tee -a "macos26-diagnostics/v4.62.1-${format}-launch-observation.log"
+          done
+
+      - name: Verify exact artifact provenance and macOS 26 signing policy
+        shell: bash
+        env:
+          LNWJUD_RELEASE_PLATFORM: darwin
+          LNWJUD_EXPECTED_COMMIT_SHA: ${{ github.sha }}
+          LNWJUD_REQUIRE_CLEAN_PROVENANCE: '1'
+          LNWJUD_RELEASE_ARTIFACT_ONLY: '1'
+        run: |
+          set -euo pipefail
+          provenance_list="$RUNNER_TEMP/lnwjud-macos26-provenance.txt"
+          find "$GITHUB_WORKSPACE/macos26-artifact" -type f -name PROVENANCE.json -print > "$provenance_list"
+          provenance_count="$(wc -l < "$provenance_list" | tr -d '[:space:]')"
+          if [[ "$provenance_count" -ne 1 ]]; then
+            echo "Expected one PROVENANCE.json, found $provenance_count" >&2
+            exit 1
+          fi
+          IFS= read -r provenance_path < "$provenance_list"
+          installer_directory="$(dirname "$provenance_path")"
+          export LNWJUD_RELEASE_INSTALLER_DIRECTORY="$installer_directory"
+          node apps/desktop/scripts/verify-release-evidence.mjs
+          version="$(node -p "require('./package.json').version")"
+          dmg="$installer_directory/lnwjud-${version}-${{ matrix.arch }}.dmg"
+          zip="$installer_directory/lnwjud-${version}-${{ matrix.arch }}.zip"
+          mkdir -p macos26-diagnostics
+          sw_vers > macos26-diagnostics/os.txt
+          uname -a >> macos26-diagnostics/os.txt
+          shasum -a 256 "$dmg" "$zip" > macos26-diagnostics/artifact-sha256.txt
+          bash scripts/verify-macos-release.sh "$dmg" 2>&1 | tee macos26-diagnostics/verify-dmg.log
+          bash scripts/verify-macos-release.sh "$zip" 2>&1 | tee macos26-diagnostics/verify-zip.log
+          echo "LNWJUD_MACOS26_DMG=$dmg" >> "$GITHUB_ENV"
+          echo "LNWJUD_MACOS26_ZIP=$zip" >> "$GITHUB_ENV"
+
+      # Keep the artifacts staged-only here so the UI smoke owns the only live
+      # package instance and its startup journal identifies any pre-window block.
+      # LaunchServices verification still runs independently after UI acceptance.
+      - name: Stage exact DMG and ZIP apps without launching
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_app="$RUNNER_TEMP/lnwjud-macos26-dmg/lnwjud.app"
+          zip_app="$RUNNER_TEMP/lnwjud-macos26-zip/lnwjud.app"
+          bash scripts/stage-macos-smoke-app.sh "$LNWJUD_MACOS26_DMG" "$dmg_app" stage-only
+          bash scripts/stage-macos-smoke-app.sh "$LNWJUD_MACOS26_ZIP" "$zip_app" stage-only
+          echo "LNWJUD_PACKAGED_EXECUTABLE=$dmg_app/Contents/MacOS/lnwjud" >> "$GITHUB_ENV"
+
+      - name: Run packaged Electron smoke on macOS 26
+        shell: bash
+        timeout-minutes: 10
+        env:
+          DEBUG: pw:browser*
+          ELECTRON_ENABLE_LOGGING: '1'
+          # GitHub's macOS 26 arm64 runner has no usable login Keychain for a
+          # packaged smoke process. The app accepts this fixture-only switch
+          # only together with LNWJUD_E2E_FIXTURE and only on that host.
+          LNWJUD_E2E_EPHEMERAL_SECRETS: '1'
+        run: |
+          set -euo pipefail
+          mkdir -p macos26-diagnostics
+          ci_keychain="$RUNNER_TEMP/lnwjud-macos26-${{ matrix.arch }}.keychain-db"
+          ci_keychain_password="$(uuidgen)"
+          echo "::add-mask::$ci_keychain_password"
+          original_default_keychain="$(security default-keychain -d user | sed -e 's/^[[:space:]]*//' -e 's/^"//' -e 's/"$//')"
+          original_keychains=()
+          while IFS= read -r keychain_line; do
+            keychain_path="$(printf '%s' "$keychain_line" | sed -e 's/^[[:space:]]*//' -e 's/^"//' -e 's/"$//')"
+            if [[ -n "$keychain_path" ]]; then original_keychains+=("$keychain_path"); fi
+          done < <(security list-keychains -d user)
+          cleanup_ci_keychain() {
+            if [[ -n "$original_default_keychain" ]]; then
+              security default-keychain -d user -s "$original_default_keychain" || true
+            fi
+            if [[ "${#original_keychains[@]}" -gt 0 ]]; then
+              security list-keychains -d user -s "${original_keychains[@]}" || true
+            fi
+            security delete-keychain "$ci_keychain" || true
+          }
+          trap cleanup_ci_keychain EXIT
+          security create-keychain -p "$ci_keychain_password" "$ci_keychain"
+          security set-keychain-settings -lut 21600 "$ci_keychain"
+          security unlock-keychain -p "$ci_keychain_password" "$ci_keychain"
+          security list-keychains -d user -s "$ci_keychain" "${original_keychains[@]}"
+          security default-keychain -d user -s "$ci_keychain"
+          {
+            echo 'User keychains:'
+            security list-keychains -d user
+            echo 'Default keychain:'
+            security default-keychain -d user
+            default_keychain="$(security default-keychain -d user | tr -d ' \"')"
+            if [[ -n "$default_keychain" ]]; then security show-keychain-info "$default_keychain"; fi
+          } > macos26-diagnostics/keychain-context.log 2>&1 || true
+          cd apps/desktop
+          node node_modules/@playwright/test/cli.js test --config playwright.config.ts desktop-dashboard.e2e.ts electron-security.e2e.ts --trace=retain-on-failure --reporter=list,html
+
+      - name: Launch exact DMG and ZIP apps through LaunchServices
+        shell: bash
+        run: |
+          set -euo pipefail
+          dmg_app="$RUNNER_TEMP/lnwjud-macos26-dmg/lnwjud.app"
+          zip_app="$RUNNER_TEMP/lnwjud-macos26-zip/lnwjud.app"
+          bash scripts/stage-macos-smoke-app.sh "$LNWJUD_MACOS26_DMG" "$dmg_app" 2>&1 | tee macos26-diagnostics/launch-dmg.log
+          bash scripts/stage-macos-smoke-app.sh "$LNWJUD_MACOS26_ZIP" "$zip_app" 2>&1 | tee macos26-diagnostics/launch-zip.log
+
+      - name: Upload macOS 26 compatibility diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: macos26-compat-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            macos26-diagnostics/
+            apps/desktop/test-results/
+            apps/desktop/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+  windows-release-tests:
+    name: Windows Workspace Release Tests
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build workspace type declarations
+        run: pnpm typecheck
+
+      - name: Install ripgrep for workspace search integration
+        shell: powershell
+        run: |
+          if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+            $rgDir = Join-Path $env:RUNNER_TEMP 'ripgrep-workspace-tests'
+            New-Item -ItemType Directory -Force -Path $rgDir | Out-Null
+            $zip = Join-Path $rgDir 'ripgrep.zip'
+            Invoke-WebRequest -Uri 'https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-pc-windows-msvc.zip' -OutFile $zip -UseBasicParsing
+            Expand-Archive -Path $zip -DestinationPath $rgDir -Force
+            $rgExe = (Get-ChildItem -Path $rgDir -Filter 'rg.exe' -Recurse | Select-Object -First 1).FullName
+            Copy-Item -LiteralPath $rgExe -Destination (Join-Path $rgDir 'rg.exe') -Force
+            $rgDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+            $env:PATH = "$rgDir;$env:PATH"
+          }
+          rg --version
+
+      - name: Run complete Windows workspace release suite
+        run: pnpm test:release
+
+  windows-release-build:
+    # Direct non-main pushes already run the native platform contract matrix;
+    # keep this portable gate for PRs, main, and explicit manual dispatches.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    name: Windows Release Build and Checks
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Install cosign for tunnel provenance verification
+        id: cosign_action
+        continue-on-error: true
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Install checksum-pinned cosign fallback
+        if: steps.cosign_action.outcome == 'failure'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = 'v3.1.3'
+          $expectedSha256 = '9fe59be0eca1271873ce019061335eb1ac419b7059202e797828467ddabe33be'
+          $installDir = Join-Path $env:RUNNER_TEMP 'lnwjud-cosign'
+          $target = Join-Path $installDir 'cosign.exe'
+          New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+          $url = "https://github.com/sigstore/cosign/releases/download/$version/cosign-windows-amd64.exe"
+          $downloaded = $false
+          for ($attempt = 1; $attempt -le 4; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $url -OutFile $target -UseBasicParsing
+              $downloaded = $true
+              break
+            }
+            catch {
+              if ($attempt -eq 4) { throw }
+              Start-Sleep -Seconds (2 * $attempt)
+            }
+          }
+          if (-not $downloaded) { throw 'Failed to download cosign fallback.' }
+          $actualSha256 = (Get-FileHash -Algorithm SHA256 -Path $target).Hash.ToLowerInvariant()
+          if ($actualSha256 -ne $expectedSha256) {
+            throw "cosign SHA-256 mismatch: expected $expectedSha256, got $actualSha256"
+          }
+          $installDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          "LNWJUD_COSIGN_PATH=$target" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Verify cosign release verifier
+        shell: powershell
+        run: |
+          $cosign = if ($env:LNWJUD_COSIGN_PATH) { $env:LNWJUD_COSIGN_PATH } else { 'cosign' }
+          $versionText = (& $cosign version 2>&1 | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "cosign failed to run: $versionText" }
+          if ($versionText -notmatch 'v?3\.1\.3') { throw "Expected cosign v3.1.3, got: $versionText" }
+          Write-Host $versionText
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install ripgrep for E2E search
+        shell: powershell
+        run: |
+          if (Get-Command rg -ErrorAction SilentlyContinue) {
+            rg --version
+          }
+          else {
+            try {
+              choco install ripgrep -y --no-progress
+            } catch {}
+            if (-not (Get-Command rg -ErrorAction SilentlyContinue)) {
+              $rgDir = Join-Path $env:RUNNER_TEMP 'ripgrep'
+              New-Item -ItemType Directory -Force -Path $rgDir | Out-Null
+              $zip = Join-Path $rgDir 'ripgrep.zip'
+              Invoke-WebRequest -Uri 'https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep-14.1.1-x86_64-pc-windows-msvc.zip' -OutFile $zip -UseBasicParsing
+              Expand-Archive -Path $zip -DestinationPath $rgDir -Force
+              $rgExe = (Get-ChildItem -Path $rgDir -Filter 'rg.exe' -Recurse | Select-Object -First 1).FullName
+              Copy-Item -LiteralPath $rgExe -Destination (Join-Path $rgDir 'rg.exe') -Force
+              $rgDir | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              $env:PATH = "$rgDir;$env:PATH"
+            }
+            rg --version
+          }
+
+      - name: Run pull-request verification gate
+        if: github.event_name == 'pull_request' || github.ref != 'refs/heads/main'
+        shell: powershell
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-release.ps1 -SkipWindowsPackaging -SkipWorkspaceTests
+
+      - name: Run authoritative release verification gate
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        shell: powershell
+        env:
+          # electron-builder signs only when both real production certificate secrets exist.
+          # Unsigned community releases remain supported; Release verifies provenance/hashes and reports signing state.
+          CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/verify-release.ps1 -SkipWorkspaceTests
+
+      - name: Verify packaged Windows legacy-profile startup
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        env:
+          LNWJUD_PACKAGED_EXECUTABLE: ${{ github.workspace }}/apps/desktop/dist/installers/win-unpacked/lnwjud.exe
+        run: pnpm --filter @lnwjud/desktop exec playwright test --config playwright.config.ts --grep "Windows upgrade opens"
+
+      - name: Upload Windows E2E diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-e2e-${{ github.sha }}
+          path: |
+            apps/desktop/test-results/
+            apps/desktop/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload verified Windows release artifact
+        if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-release-${{ github.sha }}
+          path: |
+            apps/desktop/dist/installers/*.exe
+            apps/desktop/dist/installers/*.blockmap
+            apps/desktop/dist/installers/latest.yml
+            apps/desktop/dist/installers/portable.yml
+            apps/desktop/dist/installers/SHA256SUMS.txt
+            apps/desktop/dist/installers/PROVENANCE.json
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+
+  verify:
+    # Preserve the branch-protection check name. Both Windows jobs must pass
+    # before this required status can succeed or a release can use the run.
+    name: Authoritative Release Verification (Windows)
+    if: always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    needs: [windows-release-tests, windows-release-build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require complete Windows release gates
+        env:
+          WORKSPACE_TESTS_RESULT: ${{ needs.windows-release-tests.result }}
+          BUILD_RESULT: ${{ needs.windows-release-build.result }}
+        run: |
+          test "$WORKSPACE_TESTS_RESULT" = success
+          test "$BUILD_RESULT" = success

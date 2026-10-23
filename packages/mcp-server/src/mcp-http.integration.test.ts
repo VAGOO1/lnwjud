@@ -1,0 +1,828 @@
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
+import { ok } from '@lnwjud/domain';
+import type { ToolAvailabilitySnapshot } from '@lnwjud/shared';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ActivityTracker } from './activity-tracker.js';
+import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
+import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
+import { LNWJUD_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
+
+const TEST_PNG_640X480 = 'iVBORw0KGgoAAAANSUhEUgAAAoAAAAHgCAIAAAC6s0uzAAAF9klEQVR42u3VoQEAMAjAsDGJRvP/mXwBJjmhppHVDwDY9SUAAAMGAAMGAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgADBgAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYAAwYADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAMGAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgADBgAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYAAwYADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAMGAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgADBgAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYAAwYADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAMGAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgADBgAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYAAwYADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAMGAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAMGAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgADBgAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYAAwYADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAwYAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgAMGAAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYADBgADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAwYAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgAMGAAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYADBgADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAwYAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgAMGAAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYADBgADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAwYAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgAMGAAMGAAMGAAwIABwIABAAMGAAMGAAwYAAwYADBgADBgADBgAMCAAcCAAQADBgADBgAMGAAMGAAwYAAwYAAwYADAgAHAgAEAAwYAAwYADBgADBgAMGAAMGAAMGAAwIABwIABAAMGAAMGAAwYAO4Ng+cD/NAAns4AAAAASUVORK5CYII=';
+const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
+
+describe('MCP localhost HTTP transport', () => {
+  let handle: McpHttpServerHandle;
+  let workspaceListCalls: number;
+  let workspaceListImpl: () => Promise<ReturnType<typeof ok<readonly { id: string; kind: string }[]>>>;
+  let activityTracker: ActivityTracker;
+
+  beforeEach(async () => {
+    workspaceListCalls = 0;
+    activityTracker = new ActivityTracker();
+    workspaceListImpl = async (): Promise<ReturnType<typeof ok<readonly { id: string; kind: string }[]>>> => ok([{ id: 'workspace-1', kind: 'project' }]);
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() {
+            workspaceListCalls += 1;
+            return workspaceListImpl();
+          },
+        },
+      },
+      actor: { clientId: 'http-test', clientName: 'http-test' },
+      activityTracker,
+    });
+  });
+
+  afterEach(async () => {
+    await handle.close();
+  });
+
+  it('binds the server to the loopback address and serves v2026-07-28 tools', async () => {
+    expect(handle.address.host).toBe('127.0.0.1');
+    expect(handle.address.port).toBeGreaterThan(0);
+    expect(handle.endpoint.pathname).toBe('/mcp');
+
+    const client = new Client(
+      { name: 'lnwjud-http-test-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const first = await client.listTools();
+      const second = await client.listTools();
+
+      expect(first.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
+      expect(first.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('advertises the Secure Tunnel no-OAuth contract with empty protected-resource 404s', async () => {
+    for (const pathname of ['/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-protected-resource']) {
+      const response = await fetch(new URL(pathname, handle.endpoint));
+      expect(response.status).toBe(404);
+      expect(await response.text()).toBe('');
+    }
+  });
+
+  it('tears down every modern per-request MCP server after successful requests', async () => {
+    await handle.close();
+    const listeners = new Set<(snapshot: ToolAvailabilitySnapshot) => void>();
+    let created = 0;
+    let closed = 0;
+    handle = await startMcpHttp({
+      port: 0,
+      services: {},
+      actor: { clientId: 'modern-lifecycle-test', clientName: 'modern-lifecycle-test' },
+      toolAvailabilitySubscribe(listener): () => void {
+        created += 1;
+        listeners.add(listener);
+        return () => {
+          if (listeners.delete(listener)) closed += 1;
+        };
+      },
+    });
+
+    const client = new Client(
+      { name: 'modern-lifecycle-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const requestCount = 16;
+      for (let index = 0; index < requestCount; index += 1) {
+        const tools = await client.listTools();
+        expect(tools.tools.length).toBeGreaterThan(0);
+      }
+
+      await vi.waitFor(() => {
+        expect(listeners.size).toBe(1);
+        expect(closed).toBe(created - 1);
+      });
+      expect(created).toBeGreaterThanOrEqual(requestCount);
+      await handle.close();
+      expect(listeners.size).toBe(0);
+      expect(closed).toBe(created);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  }, 15_000);
+
+  it('publishes endpoint tool changes to a modern listen stream and refreshes the next tools/list response', async () => {
+    await handle.close();
+    let snapshot: ToolAvailabilitySnapshot = { version: 1, generation: 0, overrides: {} };
+    const listeners = new Set<(next: ToolAvailabilitySnapshot) => void>();
+    handle = await startMcpHttp({
+      port: 0,
+      services: {},
+      actor: { clientId: 'modern-tool-list-change-test', clientName: 'modern-tool-list-change-test' },
+      toolAvailabilitySnapshotProvider: () => snapshot,
+      toolAvailabilitySubscribe(listener): () => void {
+        listeners.add(listener);
+        return () => { listeners.delete(listener); };
+      },
+    });
+
+    const client = new Client(
+      { name: 'modern-tool-list-change-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    let notifications = 0;
+    client.setNotificationHandler('notifications/tools/list_changed', () => { notifications += 1; });
+
+    try {
+      await client.connect(transport);
+      const initial = await client.listTools(undefined, { cacheMode: 'refresh' });
+      expect(initial.tools.map((tool) => tool.name)).toContain('read_file');
+      const subscription = await client.listen({ toolsListChanged: true });
+      expect(subscription.honoredFilter).toMatchObject({ toolsListChanged: true });
+
+      snapshot = { version: 1, generation: 1, overrides: { read_file: 'disabled' } };
+      for (const listener of [...listeners]) listener(snapshot);
+
+      await vi.waitFor(() => { expect(notifications).toBe(1); }, { timeout: 1_000 });
+      const updated = await client.listTools(undefined, { cacheMode: 'refresh' });
+      expect(updated.tools.map((tool) => tool.name)).not.toContain('read_file');
+      await subscription.close();
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('preserves one-shot continuation tokens across modern per-request MCP server recreation', async () => {
+    await handle.close();
+    const sourceLines = ['one', 'two', 'three', 'four'];
+    const contextPaths = ['src/first.ts', 'src/second.ts', 'src/third.ts'];
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+        search: {
+          async searchText() {
+            return ok({
+              matches: contextPaths.map((path, index) => ({ path, line: index + 1, text: `needle ${index + 1}` })),
+              truncated: false,
+            });
+          },
+          async searchFiles() {
+            return ok({ paths: contextPaths, truncated: false });
+          },
+        },
+        file: {
+          async readFile(_actor, _workspaceId, request) {
+            const start = request.startLine ?? 1;
+            const end = Math.min(request.endLine ?? sourceLines.length, sourceLines.length);
+            const content = sourceLines.slice(start - 1, end).join('\n');
+            return ok({
+              path: request.path,
+              content,
+              startLine: start,
+              endLine: end,
+              encoding: 'utf8' as const,
+              byteLength: Buffer.byteLength(content, 'utf8'),
+            });
+          },
+        },
+        git: {
+          async status() { return ok({ entries: [] }); },
+        },
+      },
+      actor: { clientId: 'continuation-http-test', clientName: 'continuation-http-test' },
+    });
+
+    const client = new Client(
+      { name: 'continuation-modern-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+
+      const firstPage = await client.callTool({
+        name: 'read_file_page',
+        arguments: { workspaceId: 'workspace-1', path: 'large.txt', pageSize: 1 },
+      });
+      expect(firstPage.isError).not.toBe(true);
+      const pageToken = firstPage.structuredContent?.continuationToken;
+      expect(pageToken).toEqual(expect.any(String));
+
+      const secondPage = await client.callTool({
+        name: 'read_file_page_continue',
+        arguments: { continuationToken: pageToken, pageSize: 1 },
+      });
+      expect(secondPage.isError, JSON.stringify(secondPage)).not.toBe(true);
+      expect(secondPage.structuredContent).toMatchObject({ startLine: 2, endLine: 2, content: 'two' });
+
+      const reusedPage = await client.callTool({
+        name: 'read_file_page_continue',
+        arguments: { continuationToken: pageToken, pageSize: 1 },
+      });
+      expect(reusedPage.isError).toBe(true);
+      expect(JSON.stringify(reusedPage.structuredContent)).toContain('invalid or expired');
+
+      const firstContext = await client.callTool({
+        name: 'workspace_context',
+        arguments: { workspaceId: 'workspace-1', query: 'needle', mode: 'full', pageSize: 1 },
+      });
+      expect(firstContext.isError).not.toBe(true);
+      const contextToken = firstContext.structuredContent?.continuationToken;
+      expect(contextToken).toEqual(expect.any(String));
+
+      const secondContext = await client.callTool({
+        name: 'workspace_context_continue',
+        arguments: { continuationToken: contextToken, pageSize: 1 },
+      });
+      expect(secondContext.isError, JSON.stringify(secondContext)).not.toBe(true);
+      expect(secondContext.structuredContent?.files).toHaveLength(1);
+
+      const firstScan = await client.callTool({
+        name: 'workspace_full_scan',
+        arguments: { workspaceId: 'workspace-1', includeIgnored: true, pageSize: 1 },
+      });
+      expect(firstScan.isError).not.toBe(true);
+      const scanToken = firstScan.structuredContent?.continuationToken;
+      expect(scanToken).toEqual(expect.any(String));
+
+      const secondScan = await client.callTool({
+        name: 'workspace_full_scan_continue',
+        arguments: { continuationToken: scanToken, pageSize: 1 },
+      });
+      expect(secondScan.isError, JSON.stringify(secondScan)).not.toBe(true);
+      expect(secondScan.structuredContent?.files).toHaveLength(1);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('preserves context economy telemetry across modern per-request MCP server recreation', async () => {
+    await handle.close();
+    const content = 'export const needle = true;\n';
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+        search: {
+          async searchText() { return ok({ matches: [{ path: 'src/app.ts', line: 1, text: 'needle' }], truncated: false }); },
+          async searchFiles() { return ok({ paths: ['src/app.ts'], truncated: false }); },
+        },
+        file: {
+          async readFile(_actor, _workspaceId, request) {
+            return ok({
+              path: request.path,
+              content,
+              startLine: 1,
+              endLine: 1,
+              encoding: 'utf8' as const,
+              byteLength: Buffer.byteLength(content, 'utf8'),
+            });
+          },
+        },
+        git: { async status() { return ok({ entries: [] }); } },
+      },
+      actor: { clientId: 'context-economy-http-test', clientName: 'context-economy-http-test' },
+    });
+
+    const client = new Client(
+      { name: 'context-economy-modern-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+
+      const first = await client.callTool({
+        name: 'workspace_context',
+        arguments: { workspaceId: 'workspace-1', query: 'needle', pageSize: 1 },
+      });
+      expect(first.isError).not.toBe(true);
+      expect(first.structuredContent?.economy).toMatchObject({ ledgerEntries: 1, ledgerHits: 0 });
+
+      const stats = await client.callTool({ name: 'context_economy_stats', arguments: {} });
+      expect(stats.isError).not.toBe(true);
+      expect(stats.structuredContent).toMatchObject({ ledgerEntries: 1 });
+
+      const second = await client.callTool({
+        name: 'workspace_context',
+        arguments: { workspaceId: 'workspace-1', query: 'needle', pageSize: 1 },
+      });
+      expect(second.isError).not.toBe(true);
+      expect(second.structuredContent?.files).toEqual([
+        expect.objectContaining({ path: 'src/app.ts', delivery: 'unchanged' }),
+      ]);
+      expect(second.structuredContent?.economy).toMatchObject({ ledgerEntries: 1 });
+      expect(Number(second.structuredContent?.economy?.ledgerHits ?? 0)).toBeGreaterThan(0);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('advertises outcome-driven continuation without an elapsed-time cutoff', async () => {
+    const client = new Client({ name: 'continuity-policy-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+      const instructions = client.getInstructions();
+
+      expect(instructions).toContain('until the requested outcome is complete');
+      expect(instructions).toContain('because elapsed time has passed');
+      expect(instructions).toContain('Before the first mutation of any multi-step change');
+      expect(instructions).toContain('call run_goal with scheduledContinuation=auto');
+      expect(instructions).toContain('enroll it before the next mutation');
+      expect(instructions).not.toMatch(/\b(?:22|25|60)\s*minutes?\b/i);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('preserves exact Ponytail activation across modern HTTP server recreation', async () => {
+    const writes: string[] = [];
+    const ponytailHandle = await startMcpHttp({
+      port: 0,
+      services: {
+        file: {
+          async readFile(_actor, _workspaceId, request) {
+            return ok({ path: request.path, content: '{}', startLine: 1, endLine: 1 });
+          },
+          async writeFile(_actor, _workspaceId, request) {
+            writes.push(request.path);
+            return ok({ path: request.path, replacedExisting: false });
+          },
+        },
+        extensions: {
+          async readSkill(input) {
+            return ok({
+              id: input.skillId,
+              name: 'ponytail',
+              description: 'bundled primary',
+              source: 'bundled:agent-skills',
+              trustTier: 'bundled',
+              path: 'resources/agent-skills/ponytail/SKILL.md',
+              content: '# Ponytail',
+            });
+          },
+        },
+      } as unknown as McpApplicationServices,
+      actor: { clientId: 'ponytail-http-test', clientName: 'ponytail-http-test' },
+      ponytailModeProvider: () => 'full',
+    });
+    const client = new Client(
+      { name: 'ponytail-http-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(ponytailHandle.endpoint);
+    try {
+      await client.connect(transport);
+      const blocked = await client.callTool({
+        name: 'write_file', arguments: { workspaceId: 'workspace-1', path: 'src/http.ts', content: 'export const x = 1;\n' },
+      });
+      expect(blocked.isError).toBe(true);
+      expect(JSON.stringify(blocked.structuredContent)).toContain(BUNDLED_PONYTAIL_SKILL_ID);
+      expect(writes).toEqual([]);
+
+      const loaded = await client.callTool({
+        name: 'skill_load', arguments: { skillId: BUNDLED_PONYTAIL_SKILL_ID, workspaceId: 'workspace-1' },
+      });
+      expect(loaded.isError).not.toBe(true);
+
+      const allowed = await client.callTool({
+        name: 'write_file', arguments: { workspaceId: 'workspace-1', path: 'src/http.ts', content: 'export const x = 2;\n' },
+      });
+      expect(allowed.isError).not.toBe(true);
+      expect(writes).toEqual(['src/http.ts']);
+    } finally {
+      await client.close().catch(() => undefined);
+      await ponytailHandle.close();
+    }
+  });
+
+  it('keeps one legacy 2025 session alive across sequential production tool calls', async () => {
+    const client = new Client({ name: 'codex-compatible-http-test-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+
+    try {
+      await client.connect(transport);
+
+      expect(transport.sessionId).toEqual(expect.any(String));
+      const tools = await client.listTools();
+      expect(tools.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
+      expect(tools.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+
+      const first = await client.callTool({ name: 'workspace_list', arguments: {} });
+      const second = await client.callTool({ name: 'workspace_list', arguments: {} });
+      const third = await client.callTool({ name: 'workspace_list', arguments: {} });
+
+      expect(first.isError).not.toBe(true);
+      expect(second.isError).not.toBe(true);
+      expect(third.isError).not.toBe(true);
+      expect(workspaceListCalls).toBe(3);
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('keeps a legacy session usable after the client transport disconnects and reconnects', async () => {
+    const firstClient = new Client({ name: 'disconnecting-client', version: '0.1.0' });
+    const firstTransport = new StreamableHTTPClientTransport(handle.endpoint);
+    await firstClient.connect(firstTransport);
+
+    const sessionId = firstTransport.sessionId;
+    const protocolVersion = firstTransport.protocolVersion;
+    expect(sessionId).toEqual(expect.any(String));
+    expect((await firstClient.callTool({ name: 'workspace_list', arguments: {} })).isError).not.toBe(true);
+
+    await firstClient.close();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const reconnectTransport = new StreamableHTTPClientTransport(handle.endpoint, {
+      sessionId,
+      protocolVersion,
+    });
+    await reconnectTransport.start();
+    try {
+      const response = new Promise<unknown>((resolve, reject): void => {
+        const timeout = setTimeout(() => reject(new Error('Timed out waiting for reconnect tool response')), 2_000);
+        reconnectTransport.onerror = reject;
+        reconnectTransport.onmessage = (message): void => {
+          if ('id' in message && message.id === 71) {
+            clearTimeout(timeout);
+            resolve(message);
+          }
+        };
+      });
+      await reconnectTransport.send({
+        jsonrpc: '2.0',
+        id: 71,
+        method: 'tools/call',
+        params: { name: 'workspace_list', arguments: {} },
+      });
+      const message = await response;
+      expect(message).toMatchObject({ jsonrpc: '2.0', id: 71 });
+      expect(workspaceListCalls).toBe(2);
+    } finally {
+      await reconnectTransport.close();
+    }
+  });
+
+  it('releases an aborted standalone SSE stream so the same session can reconnect', async () => {
+    const client = new Client({ name: 'sse-disconnect-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    await client.connect(transport);
+
+    const sessionId = transport.sessionId;
+    const protocolVersion = transport.protocolVersion;
+    expect(sessionId).toEqual(expect.any(String));
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await client.close();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const controller = new AbortController();
+    try {
+      const reopened = fetch(handle.endpoint, {
+        method: 'GET',
+        headers: {
+          accept: 'text/event-stream',
+          'mcp-session-id': sessionId!,
+          ...(protocolVersion === undefined ? {} : { 'mcp-protocol-version': protocolVersion }),
+        },
+        signal: controller.signal,
+      });
+      const response = await Promise.race([
+        reopened,
+        new Promise<never>((_, reject) => setTimeout(() => reject(new Error('SSE reconnect did not receive headers')), 1_000)),
+      ]);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('content-type')).toContain('text/event-stream');
+    } finally {
+      controller.abort();
+    }
+  });
+
+  it('cancels a modern HTTP mutation while host approval is open without dispatching it', async () => {
+    await handle.close();
+    let approvalSignal: AbortSignal | undefined;
+    let enteredApproval!: () => void;
+    const approvalEntered = new Promise<void>((resolve) => { enteredApproval = resolve; });
+    const dispatched: unknown[] = [];
+    const cancellationActivity = new ActivityTracker();
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        extensions: { async callMcpTool(input: unknown) { dispatched.push(input); return ok({ dispatched: true }); } },
+      } as unknown as McpApplicationServices,
+      actor: { clientId: 'modern-approval-cancel-test', clientName: 'modern-approval-cancel-test' },
+      activityTracker: cancellationActivity,
+      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-1', rootPath: 'C:\\workspace-1' }),
+      hostMutationApprovalProvider: async (_request, context): Promise<boolean> => {
+        approvalSignal = context.signal;
+        enteredApproval();
+        return new Promise<boolean>((resolve) => context.signal.addEventListener('abort', () => resolve(false), { once: true }));
+      },
+    });
+    const client = new Client(
+      { name: 'modern-approval-cancel-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    const controller = new AbortController();
+    try {
+      await client.connect(transport);
+      const pending = client.callTool({
+        name: 'mcp_call', arguments: { server: 'fixture', tool: 'mutate', arguments: { action: 'write' }, userConfirmed: true },
+      }, { signal: controller.signal });
+      const pendingOutcome = pending.then(() => 'fulfilled' as const, () => 'rejected' as const);
+      await approvalEntered;
+      controller.abort(new Error('client closed the HTTP request'));
+
+      await vi.waitFor(() => expect(approvalSignal?.aborted).toBe(true));
+      expect(await pendingOutcome).toBe('rejected');
+      await vi.waitFor(() => {
+        expect(dispatched).toEqual([]);
+        expect(cancellationActivity.telemetrySnapshot().cancellations).toBe(1);
+      });
+
+      const recovery = await client.listTools();
+      expect(recovery.tools.length).toBeGreaterThan(0);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('cancels a legacy protocol request before host approval and keeps that session reusable', async () => {
+    await handle.close();
+    let approvalSignal: AbortSignal | undefined;
+    let enteredApproval!: () => void;
+    const approvalEntered = new Promise<void>((resolve) => { enteredApproval = resolve; });
+    const dispatched: unknown[] = [];
+    const cancellationActivity = new ActivityTracker();
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+        extensions: { async callMcpTool(input: unknown) { dispatched.push(input); return ok({ dispatched: true }); } },
+      } as unknown as McpApplicationServices,
+      actor: { clientId: 'legacy-approval-cancel-test', clientName: 'legacy-approval-cancel-test' },
+      activityTracker: cancellationActivity,
+      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-1', rootPath: 'C:\\workspace-1' }),
+      hostMutationApprovalProvider: async (_request, context): Promise<boolean> => {
+        approvalSignal = context.signal;
+        enteredApproval();
+        return new Promise<boolean>((resolve) => context.signal.addEventListener('abort', () => resolve(false), { once: true }));
+      },
+    });
+    const client = new Client({ name: 'legacy-approval-cancel-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    const controller = new AbortController();
+    try {
+      await client.connect(transport);
+      expect(transport.sessionId).toEqual(expect.any(String));
+      const pending = client.callTool({
+        name: 'mcp_call', arguments: { server: 'fixture', tool: 'mutate', arguments: { action: 'write' }, userConfirmed: true },
+      }, { signal: controller.signal });
+      const pendingOutcome = pending.then(() => 'fulfilled' as const, () => 'rejected' as const);
+      await approvalEntered;
+      controller.abort(new Error('client cancelled the legacy request'));
+
+      await vi.waitFor(() => expect(approvalSignal?.aborted).toBe(true));
+      expect(await pendingOutcome).toBe('rejected');
+      await vi.waitFor(() => {
+        expect(dispatched).toEqual([]);
+        expect(cancellationActivity.telemetrySnapshot().cancellations).toBe(1);
+      });
+
+      const recovered = await client.callTool({ name: 'workspace_list', arguments: {} });
+      expect(recovered.isError).not.toBe(true);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('cancels a raw disconnected legacy HTTP request without closing its session', async () => {
+    await handle.close();
+    let approvalSignal: AbortSignal | undefined;
+    let enteredApproval!: () => void;
+    const approvalEntered = new Promise<void>((resolve) => { enteredApproval = resolve; });
+    const dispatched: unknown[] = [];
+    const cancellationActivity = new ActivityTracker();
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        workspaceInfo: {
+          async info() { return ok({ id: 'workspace-1' }); },
+          async list() { return ok([{ id: 'workspace-1', kind: 'project' }]); },
+        },
+        extensions: { async callMcpTool(input: unknown) { dispatched.push(input); return ok({ dispatched: true }); } },
+      } as unknown as McpApplicationServices,
+      actor: { clientId: 'legacy-raw-disconnect-test', clientName: 'legacy-raw-disconnect-test' },
+      activityTracker: cancellationActivity,
+      activeWorkspaceScopeProvider: async () => ({ workspaceId: 'workspace-1', rootPath: 'C:\\workspace-1' }),
+      hostMutationApprovalProvider: async (_request, context): Promise<boolean> => {
+        approvalSignal = context.signal;
+        enteredApproval();
+        return new Promise<boolean>((resolve) => context.signal.addEventListener('abort', () => resolve(false), { once: true }));
+      },
+    });
+    const client = new Client({ name: 'legacy-raw-disconnect-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    const controller = new AbortController();
+    try {
+      await client.connect(transport);
+      const sessionId = transport.sessionId;
+      const protocolVersion = transport.protocolVersion;
+      expect(sessionId).toEqual(expect.any(String));
+      const pending = fetch(handle.endpoint, {
+        method: 'POST',
+        headers: {
+          accept: 'application/json, text/event-stream',
+          'content-type': 'application/json',
+          'mcp-session-id': sessionId!,
+          ...(protocolVersion === undefined ? {} : { 'mcp-protocol-version': protocolVersion }),
+        },
+        body: JSON.stringify({
+          jsonrpc: '2.0', id: 'raw-disconnect-1', method: 'tools/call',
+          params: { name: 'mcp_call', arguments: { server: 'fixture', tool: 'mutate', arguments: { action: 'write' }, userConfirmed: true } },
+        }),
+        signal: controller.signal,
+      });
+      const pendingOutcome = pending.then(() => 'fulfilled' as const, () => 'rejected' as const);
+      await approvalEntered;
+      controller.abort(new Error('raw legacy HTTP client disconnected'));
+
+      await vi.waitFor(() => expect(approvalSignal?.aborted).toBe(true));
+      expect(await pendingOutcome).toBe('rejected');
+      await vi.waitFor(() => {
+        expect(dispatched).toEqual([]);
+        expect(cancellationActivity.telemetrySnapshot().cancellations).toBe(1);
+      });
+
+      const recovered = await client.callTool({ name: 'workspace_list', arguments: {} });
+      expect(recovered.isError).not.toBe(true);
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it('keeps concurrent calls isolated and activity accounting balanced', async () => {
+    let concurrentStarts = 0;
+    let releaseCalls!: () => void;
+    let observeBoth!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { observeBoth = resolve; });
+    const release = new Promise<void>((resolve) => { releaseCalls = resolve; });
+    workspaceListImpl = async (): Promise<ReturnType<typeof ok<readonly { id: string; kind: string }[]>>> => {
+      concurrentStarts += 1;
+      if (concurrentStarts === 2) observeBoth();
+      await release;
+      return ok([{ id: 'workspace-1', kind: 'project' }]);
+    };
+
+    const client = new Client({ name: 'concurrent-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    try {
+      await client.connect(transport);
+      const first = client.callTool({ name: 'workspace_list', arguments: {} });
+      const second = client.callTool({ name: 'workspace_list', arguments: {} });
+      await bothStarted;
+
+      expect(activityTracker.listInFlight()).toHaveLength(2);
+      expect(activityTracker.revision()).toBe(2);
+
+      releaseCalls();
+      const results = await Promise.all([first, second]);
+      expect(results.every((result) => result.isError !== true)).toBe(true);
+      expect(activityTracker.listInFlight()).toHaveLength(0);
+      expect(activityTracker.revision()).toBe(4);
+      expect(workspaceListCalls).toBe(2);
+    } finally {
+      releaseCalls?.();
+      await client.close();
+    }
+  });
+
+  it('keeps a Set-of-Marks observation alive across modern HTTP request-scoped server instances', async () => {
+    await handle.close();
+    const png = { format: 'png', mime_type: 'image/png', data_base64: TEST_PNG_640X480, width: 640, height: 480, origin_x: 0, origin_y: 0 };
+    handle = await startMcpHttp({
+      port: 0,
+      services: {
+        capabilities: {
+          async execute(tool, input) {
+            const request = input as Record<string, unknown>;
+            if (tool === 'accessibility' && request.action === 'observe') {
+              return ok({ elements: [{ element: { name: 'Save', automation_id: 'save', enabled: true, offscreen: false, bounds: { x: 20, y: 30, width: 100, height: 40 } } }] });
+            }
+            if (tool === 'accessibility' && request.action === 'find_element') return ok({ element: { name: 'Save', automation_id: 'save', bounds: { x: 20, y: 30, width: 100, height: 40 } } });
+            if (tool === 'accessibility' && request.action === 'click') return ok({ clicked: true });
+            if (tool === 'vision') return ok(png);
+            return ok({});
+          },
+        },
+      },
+      actor: { clientId: 'som-http-test', clientName: 'som-http-test' },
+      hostMutationApprovalProvider: async () => true,
+    });
+
+    const client = new Client(
+      { name: 'som-modern-client', version: '0.1.0' },
+      { versionNegotiation: { mode: { pin: '2026-07-28' } } },
+    );
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    try {
+      await client.connect(transport);
+      const directCapture = await client.callTool({
+        name: 'vision',
+        arguments: { action: 'capture_region', region: { x: 0, y: 0, width: 640, height: 480 } },
+      });
+      expect(directCapture.isError).not.toBe(true);
+      expect(directCapture.content).toEqual([
+        { type: 'image', data: TEST_PNG_640X480, mimeType: 'image/png' },
+        { type: 'text', text: JSON.stringify({ format: 'png', mime_type: 'image/png', width: 640, height: 480, origin_x: 0, origin_y: 0 }) },
+      ]);
+      expect(directCapture.structuredContent).toEqual({
+        format: 'png',
+        mime_type: 'image/png',
+        width: 640,
+        height: 480,
+        origin_x: 0,
+        origin_y: 0,
+      });
+
+      const captured = await client.callTool({ name: 'vision_annotated_capture', arguments: { workspaceId: 'workspace-1' } });
+      expect(captured.isError).not.toBe(true);
+      expect(captured.content?.[0]).toEqual({ type: 'image', data: TEST_PNG_640X480, mimeType: 'image/png' });
+      expect(captured.structuredContent?.image).toMatchObject({ format: 'png', mime_type: 'image/png', width: 640, height: 480 });
+      expect(JSON.stringify(captured.structuredContent)).not.toContain(TEST_PNG_640X480);
+
+      const computerSnapshot = await client.callTool({
+        name: 'computer_use',
+        arguments: { workspaceId: 'workspace-1', action: 'snapshot', capture: 'display' },
+      });
+      expect(computerSnapshot.isError).not.toBe(true);
+      expect(computerSnapshot.content?.[0]).toEqual({ type: 'image', data: TEST_PNG_640X480, mimeType: 'image/png' });
+      expect(computerSnapshot.structuredContent).toMatchObject({
+        mode: 'annotated',
+        image: { format: 'png', mime_type: 'image/png', width: 640, height: 480 },
+      });
+      expect(JSON.stringify(computerSnapshot.structuredContent)).not.toContain(TEST_PNG_640X480);
+
+      const observationId = captured.structuredContent?.observationId;
+      const observationHash = captured.structuredContent?.observationHash;
+      expect(observationId).toEqual(expect.any(String));
+      expect(observationHash).toEqual(expect.stringMatching(/^[a-f0-9]{64}$/));
+
+      const clicked = await client.callTool({
+        name: 'ui_target_action',
+        arguments: { workspaceId: 'workspace-1', observationId, observationHash, markId: 'm1', action: 'click', userConfirmed: true },
+      });
+      expect(clicked.isError, JSON.stringify(clicked)).not.toBe(true);
+      expect(clicked.structuredContent).toMatchObject({ clicked: true });
+    } finally {
+      await client.close();
+    }
+  });
+
+  it('serves a loopback identity document that Doctor can distinguish from an unrelated listener', async () => {
+    const identityUrl = new URL(LNWJUD_MCP_IDENTITY_PATH, handle.endpoint);
+    const response = await fetch(identityUrl);
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get('x-lnwjud-service')).toBe('desktop-mcp');
+    await expect(response.json()).resolves.toMatchObject({ product: 'lnwjud', service: 'desktop-mcp', protocol: 1 });
+  });
+
+  it('does not poison a legacy session after one protocol-level tool error', async () => {
+    const client = new Client({ name: 'error-recovery-client', version: '0.1.0' });
+    const transport = new StreamableHTTPClientTransport(handle.endpoint);
+    try {
+      await client.connect(transport);
+      await expect(client.callTool({ name: 'definitely_not_a_real_tool', arguments: {} })).rejects.toThrow();
+
+      const recovered = await client.callTool({ name: 'workspace_list', arguments: {} });
+      expect(recovered.isError).not.toBe(true);
+      expect(workspaceListCalls).toBe(1);
+    } finally {
+      await client.close();
+    }
+  });
+});

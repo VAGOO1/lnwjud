@@ -1,0 +1,25 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"]
+  },
+  "include": ["src/main/**/*.ts", "src/main/**/*.json", "src/preload/**/*.ts"],
+  "references": [
+    { "path": "../../packages/ipc-contracts" },
+    { "path": "../../packages/mcp-server" },
+    { "path": "../../packages/application" },
+    { "path": "../../packages/audit" },
+    { "path": "../../packages/capabilities" },
+    { "path": "../../packages/codex" },
+    { "path": "../../packages/domain" },
+    { "path": "../../packages/extensions" },
+    { "path": "../../packages/permissions" },
+    { "path": "../../packages/process" },
+    { "path": "../../packages/search" },
+    { "path": "../../packages/storage" },
+    { "path": "../../packages/workspace" }
+  ]
+}

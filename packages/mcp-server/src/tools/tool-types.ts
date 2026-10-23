@@ -1,0 +1,273 @@
+import { err, ok, type InvocationAuthorization, type Result } from '@lnwjud/domain';
+import type { CheckedInvocationEnvelope, McpRegistryRuntimePort } from '../registry-runtime-port.js';
+import type { CapabilityService, EventLogBackendOptions, WorkspaceWriterLeasePort } from '@lnwjud/capabilities';
+import type { ExtensionsService } from '@lnwjud/extensions';
+import type {
+  AgentSwarmService,
+  AutomationDispatchContext,
+  AutomationDispatchPort,
+  AutomationService,
+  AutomationVerificationRuntimePort,
+  ApplyPatchRequest,
+  CheckpointService,
+  CodexService,
+  CodexRulesService,
+  DeleteFileRequest,
+  EditFileRequest,
+  FileActor,
+  FileService,
+  EngineeringPreparationService,
+  GitService,
+  RepositoryImportService,
+  GoalRequestCancellationPort,
+  GoalContinuationService,
+  GoalMutationFenceService,
+  MoveFileRequest,
+  ProcessService,
+  ProjectService,
+  ReadFileRequest,
+  ReadFilesRequest,
+  SearchService,
+  ScheduledContinuationService,
+  WorkspaceIndexService,
+  WorkspacePathPreflightResult,
+  WorkspaceQueryService,
+  WriteFileRequest,
+  WorkflowTemplateService,
+  WorkflowStartService,
+  CallHistoryService,
+  TaskResultService,
+  ResourceSnapshotService,
+} from '@lnwjud/application';
+import { z } from 'zod';
+import type { ContextEconomyRuntime } from '../context-economy.js';
+import type { OfficeDataWorkflowService } from '../office-data-workflow.js';
+import type { EccRuntimeOptions } from '../ecc-provider.js';
+import type { DapSessionService } from '../dap-session-service.js';
+
+export interface WorkspaceInfoPort {
+  info(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
+  list?(actor: FileActor): Promise<Result<unknown>>;
+  preflight?(actor: FileActor, request: { readonly path: string; readonly userConfirmed?: boolean }, authorization?: InvocationAuthorization): Promise<Result<WorkspacePathPreflightResult>>;
+  register?(actor: FileActor, request: {
+    readonly parentWorkspaceId?: string;
+    readonly path: string;
+    readonly displayName?: string;
+  }): Promise<Result<unknown>>;
+}
+
+export interface ChromeWorkPreparedPlan {
+  readonly workspaceId: string;
+  readonly tabId: string;
+  readonly pageUrl: string;
+  readonly requestDigests: readonly string[];
+  readonly idempotencyKey: string;
+}
+
+export interface ProjectSnapshotPort {
+  snapshot(actor: FileActor, workspaceId: string): Promise<Result<unknown>>;
+}
+
+export type McpAutomationService = Pick<AutomationService,
+  | 'createRun'
+  | 'status'
+  | 'events'
+  | 'advance'
+  | 'pause'
+  | 'resume'
+  | 'cancel'
+  | 'finalize'
+>;
+
+export interface McpAutomationServiceFactory {
+  create(
+    runtime: AutomationDispatchPort & AutomationVerificationRuntimePort,
+    actor: FileActor,
+  ): McpAutomationService;
+}
+
+export interface McpRuntimeTiming {
+  readonly mcpPollWaitSeconds: number;
+}
+
+export interface McpApplicationServices {
+  readonly chromeWork?: {
+    prepare(actor: FileActor, plan: ChromeWorkPreparedPlan, signal: AbortSignal): Promise<Result<unknown>>;
+    extend?(actor: FileActor, request: { readonly workspaceId: string; readonly primaryWorkId: string; readonly continuityToken: string; readonly expectedConnectionRevision: number; readonly expectedBudgetRevision: number; readonly expectedContinuationRevision: number }, plan: ChromeWorkPreparedPlan, signal: AbortSignal): Promise<Result<unknown>>;
+    status(actor: FileActor, request: { readonly workspaceId: string; readonly primaryWorkId: string; readonly continuityToken?: string | undefined }, signal: AbortSignal): Promise<Result<unknown>>;
+    reconnect(actor: FileActor, request: { readonly workspaceId: string; readonly primaryWorkId: string; readonly continuityToken: string; readonly expectedConnectionRevision: number }, signal: AbortSignal): Promise<Result<unknown>>;
+  };
+  /** Host platform selected by the composition root; tests may inject a deterministic profile. */
+  readonly platform?: NodeJS.Platform;
+  readonly runtimeStatePath?: string;
+  readonly runtimeTiming?: () => McpRuntimeTiming;
+  /** Pinned ECC provider resources injected by the host composition root. */
+  readonly eccRuntimeOptions?: EccRuntimeOptions;
+  /** Optional host-owned consent gate. When present, ECC runtime actions cannot override it. */
+  readonly eccEnabledProvider?: () => boolean;
+  /** Test-only deterministic override for Windows Sandbox discovery; production runtimes leave this undefined. */
+  readonly sandboxRuntimeOptions?: { readonly platform?: NodeJS.Platform; readonly sandboxExecutable?: string };
+  /** Test-only deterministic override for native event-log queries; production runtimes leave this undefined. */
+  readonly eventLogRuntimeOptions?: EventLogBackendOptions;
+  readonly localProviders?: () => { readonly pdfProvider?: string; readonly lspCommands?: Readonly<Record<string, string>> };
+  readonly capabilities?: CapabilityService;
+  readonly debugSessions?: Pick<DapSessionService, 'attach' | 'request' | 'status' | 'disconnect'>;
+  readonly extensions?: ExtensionsService;
+  readonly workspaceInfo?: WorkspaceInfoPort;
+  readonly workspaceWriterLease?: WorkspaceWriterLeasePort;
+  readonly workspaceQuery?: Pick<WorkspaceQueryService, 'tree'>;
+  readonly projectSnapshot?: ProjectSnapshotPort;
+  readonly project?: Pick<ProjectService, 'detect'>;
+  readonly engineeringPreparation?: Pick<EngineeringPreparationService, 'prepare'>;
+  readonly file?: Pick<FileService, 'readFile' | 'readFiles' | 'writeFile' | 'applyPatch' | 'editFile' | 'moveFile' | 'copyFile' | 'deleteFile' | 'listRecoveryItems' | 'restoreDeletedFile' | 'prepareExternalFileMutation'>;
+  readonly checkpoint?: Pick<CheckpointService, 'list' | 'restore'>;
+  readonly callHistory?: Pick<CallHistoryService, 'history'>;
+  readonly taskResults?: Pick<TaskResultService, 'get'>;
+  readonly resourceSnapshot?: Pick<ResourceSnapshotService, 'get'>;
+  readonly officeDataWorkflow?: Pick<OfficeDataWorkflowService, 'audit' | 'compare' | 'createReport'>;
+  readonly workflowTemplates?: Pick<WorkflowTemplateService, 'list' | 'prepare'>;
+  readonly workflowStart?: Pick<WorkflowStartService, 'start'>;
+  readonly goals?: Pick<GoalContinuationService,
+    | 'runGoal'
+    | 'getGoal'
+    | 'validateGoalLease'
+    | 'updateGoalPlan'
+    | 'updateGoalAcceptance'
+    | 'reviseGoalIntent'
+    | 'createContextCapsule'
+    | 'getContextCapsule'
+    | 'listContextCapsules'
+    | 'recordDeliveryReceipt'
+    | 'listDeliveryReceipts'
+    | 'advanceGoalIteration'
+    | 'checkpointGoal'
+    | 'finishGoal'
+    | 'cancelGoal'
+    | 'reconcileGoals'
+    | 'listGoals'
+  >;
+  /** Runtime-shared cancellation registry for in-flight fenced MCP requests. */
+  readonly goalRequestCancellation?: GoalRequestCancellationPort;
+  readonly scheduledContinuations?: Pick<ScheduledContinuationService, 'prepareScheduledContinuation' | 'recordScheduledContinuationReceipt' | 'cancelScheduledContinuation' | 'claimScheduledContinuation' | 'getScheduledContinuation' | 'expediteScheduledContinuation'>;
+  readonly goalMutationFence?: Pick<GoalMutationFenceService, 'inspectWorkspaceFence' | 'begin' | 'heartbeat' | 'end' | 'observe'>;
+  readonly search?: Pick<SearchService, 'searchFiles' | 'searchText'>;
+  readonly workspaceIndex?: Pick<WorkspaceIndexService, 'indexWorkspace' | 'status' | 'startWatch' | 'stopWatch'>;
+  readonly git?: Pick<GitService, 'status' | 'diff' | 'log' | 'run'>;
+  readonly repositoryImport?: Pick<RepositoryImportService, 'start' | 'status' | 'cancel'>;
+  readonly process?: Pick<ProcessService, 'start' | 'list' | 'status' | 'logs' | 'stop' | 'previewProjectCommand' | 'startProjectCommand'>;
+  readonly codex?: Pick<CodexService, 'status' | 'run' | 'list' | 'taskStatus' | 'taskLogs' | 'stop'>;
+  readonly codexRules?: Pick<CodexRulesService, 'inspect' | 'backupApply' | 'rollback' | 'approvalMetadata' | 'probeNewSession' | 'probeStatus'>;
+  readonly agentSwarm?: Pick<AgentSwarmService, 'start' | 'status' | 'result' | 'cancel' | 'list'>;
+  /** Direct injection for tests and single-registry hosts. */
+  readonly automation?: McpAutomationService;
+  /** Production hosts bind an actor/session-specific registry adapter lazily to preserve task ownership. */
+  readonly automationFactory?: McpAutomationServiceFactory;
+}
+
+export interface McpToolAnnotations {
+  readonly readOnlyHint: boolean;
+  readonly destructiveHint: boolean;
+  readonly idempotentHint: boolean;
+  readonly openWorldHint: boolean;
+}
+
+export interface McpToolAnnotationInput {
+  readonly readOnlyHint: boolean;
+  readonly destructiveHint: boolean;
+  readonly idempotentHint?: boolean;
+  readonly openWorldHint?: boolean;
+}
+
+export interface McpToolExecution {
+  readonly taskSupport: 'required' | 'optional' | 'forbidden';
+}
+
+export type McpPermissionLevel = 'READ' | 'WRITE' | 'EXECUTE' | 'DANGEROUS';
+
+export interface McpToolDefinition {
+  readonly name: string;
+  readonly description: string;
+  readonly permission: McpPermissionLevel;
+  readonly annotations: McpToolAnnotations;
+  readonly inputSchema: z.ZodType;
+  readonly outputSchema?: z.ZodType;
+  readonly execution: McpToolExecution;
+  parse(input: unknown): Result<unknown>;
+  execute(
+    input: unknown,
+    signal: AbortSignal,
+    authorization?: InvocationAuthorization,
+    internal?: McpInternalInvocationContext,
+  ): Promise<Result<unknown>>;
+}
+
+export interface McpInternalInvocationContext {
+  readonly automationDispatch?: AutomationDispatchContext;
+  readonly checkedInvocation?: CheckedInvocationEnvelope;
+  readonly recipeCancellation?: { register(snapshot: () => unknown): void };
+}
+
+export interface McpToolContext {
+  readonly actor: FileActor;
+  readonly services: McpApplicationServices;
+  readonly contextEconomy: ContextEconomyRuntime;
+  readonly registryRuntime?: McpRegistryRuntimePort;
+  /** Dynamic registry exposure predicate used by discovery/ranking helpers. */
+  readonly isToolExposed?: (name: string) => boolean;
+  /** Session-scoped Ponytail suppression owned by the current ToolRegistry/transport ledger. */
+  readonly setPonytailSessionSuppressed?: (workspaceId: string, goalId: string | undefined, suppressed: boolean) => Promise<boolean>;
+}
+
+export interface ToolConfig<T extends z.ZodType> {
+  readonly name: string;
+  readonly description: string;
+  readonly permission: McpPermissionLevel;
+  readonly annotations: McpToolAnnotationInput;
+  readonly inputSchema: T;
+  /** Null disables output schema validation for passthrough MCP content-only responses. */
+  readonly outputSchema?: z.ZodType | null;
+  readonly execution?: Partial<McpToolExecution>;
+  handler(
+    input: z.infer<T>,
+    signal: AbortSignal,
+    authorization?: InvocationAuthorization,
+    internal?: McpInternalInvocationContext,
+  ): Promise<Result<unknown>>;
+}
+
+const defaultStructuredOutputSchema = z.object({}).catchall(z.unknown());
+
+export function defineTool<T extends z.ZodType>(config: ToolConfig<T>): McpToolDefinition {
+  return {
+    name: config.name,
+    description: config.description,
+    permission: config.permission,
+    annotations: {
+      readOnlyHint: config.annotations.readOnlyHint,
+      destructiveHint: config.annotations.destructiveHint,
+      idempotentHint: config.annotations.idempotentHint ?? config.permission === 'READ',
+      openWorldHint: config.annotations.openWorldHint ?? false,
+    },
+    inputSchema: config.inputSchema,
+    ...(config.outputSchema === null ? {} : { outputSchema: config.outputSchema ?? defaultStructuredOutputSchema }),
+    execution: { taskSupport: config.execution?.taskSupport ?? 'forbidden' },
+    parse(input: unknown): Result<unknown> {
+      const parsed = config.inputSchema.safeParse(input);
+      return parsed.success ? ok(parsed.data) : err({ code: 'INVALID_INPUT', message: 'Tool input is invalid', recoverable: false });
+    },
+    execute(
+      input: unknown,
+      signal: AbortSignal,
+      authorization?: InvocationAuthorization,
+      internal?: McpInternalInvocationContext,
+    ): Promise<Result<unknown>> {
+      return config.handler(input as z.infer<T>, signal, authorization, internal);
+    },
+  };
+}
+
+export function missingService<T>(): Result<T> {
+  return err({ code: 'INTERNAL_ERROR', message: 'MCP application service is unavailable', recoverable: true });
+}
+
+export type { ApplyPatchRequest, DeleteFileRequest, EditFileRequest, MoveFileRequest, ReadFileRequest, ReadFilesRequest, WriteFileRequest };

@@ -1,0 +1,289 @@
+import { readFileSync } from 'node:fs';
+import { describe, expect, it } from 'vitest';
+import { ok } from '@lnwjud/domain';
+import type { FileActor } from '@lnwjud/application';
+import { UpgradeRuntimeService } from './upgrade-runtime.js';
+import { UPGRADE_TOOL_CATALOG } from './upgrade-catalog.js';
+import { SPECIALIZED_RUNTIME_TOOL_NAMES } from './tools/upgrade-tools.js';
+import type { McpApplicationServices } from './tools/tool-types.js';
+
+const actor: FileActor = { clientId: 'readiness-test', clientName: 'readiness-test' };
+
+describe('upgrade runtime readiness facades', () => {
+  it('does not turn a missing native log provider into ready event-log context', async () => {
+    // This host has no provider, exercising the real backend's unavailable
+    // result without relying on utilities installed on the test machine.
+    const runtime = new UpgradeRuntimeService({ platform: 'freebsd' }, actor);
+    await expect(runtime.execute('event_log_context', {})).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'event_log_context', status: 'optional', available: false, ready: false, executed: false,
+        eventLog: { reason: 'portable_log_provider_missing' } },
+    });
+  });
+
+  it('honors an injected Windows event-log runner instead of querying the test host', async () => {
+    const services = {
+      platform: 'win32',
+      eventLogRuntimeOptions: {
+        runner: async () => ok(JSON.stringify([{
+          time: '2026-09-11T00:00:00.000Z',
+          provider: 'lnwjud-test',
+          id: 1,
+          level: 'Information',
+          message: 'injected-contract-event',
+        }])),
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('event_log_context', { max_events: 1 })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        eventLog: {
+          backend: 'windows-event-log',
+          count: 1,
+          events: [{ message: 'injected-contract-event' }],
+        },
+      },
+    });
+  });
+
+  it('uses the composition-root platform instead of the runner host for Windows-only diagnostics', async () => {
+    const runtime = new UpgradeRuntimeService({ platform: 'linux' }, actor);
+    await expect(runtime.execute('windows_environment', {})).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'windows_environment', status: 'unsupported', available: false, ready: false },
+    });
+    await expect(runtime.execute('registry_context', {})).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'registry_context', status: 'unsupported', available: false, ready: false },
+    });
+    await expect(runtime.execute('office_outlook', { action: 'list_messages' })).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'office_outlook', status: 'unsupported', available: false, ready: false },
+    });
+  });
+
+  it('requires every advertised ready upgrade tool to have an explicit runtime implementation case', () => {
+    const source = readFileSync(new URL('./upgrade-runtime.ts', import.meta.url), 'utf8');
+    const explicitCases = new Set([...source.matchAll(/case '([^']+)'/g)].map((match) => match[1]));
+    const missingReadyCases = UPGRADE_TOOL_CATALOG
+      .filter((entry) => (entry.availability ?? 'ready') === 'ready')
+      .map((entry) => entry.name)
+      .filter((name) => !explicitCases.has(name) && !SPECIALIZED_RUNTIME_TOOL_NAMES.has(name))
+      .sort();
+    expect(missingReadyCases).toEqual([]);
+  });
+
+  it('dispatches Git insight facades to the real Git service', async () => {
+    const calls: string[] = [];
+    const services = {
+      git: {
+        async status() { calls.push('status'); return ok({ entries: [{ path: 'packages/app/src/a.ts', kind: 'modified', indexStatus: ' ', worktreeStatus: 'M' }] }); },
+        async diff() { calls.push('diff'); return ok({ patch: 'diff --git a/a b/a', truncated: false }); },
+        async log() { calls.push('log'); return ok({ commits: [{ hash: 'abc', subject: 'change' }], truncated: false }); },
+        async run() { calls.push('run'); return ok({ exitCode: 0, stdout: 'blame-output', stderr: '' }); },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('review_changes', { workspaceId: 'ws' })).resolves.toMatchObject({ ok: true, value: { executed: true, status: 'ready' } });
+    await expect(runtime.execute('affected_modules', { workspaceId: 'ws' })).resolves.toMatchObject({ ok: true, value: { executed: true, modules: ['packages'] } });
+    await expect(runtime.execute('git_history_context', { workspaceId: 'ws' })).resolves.toMatchObject({ ok: true, value: { executed: true } });
+    await expect(runtime.execute('git_blame_context', { workspaceId: 'ws', path: 'a.ts' })).resolves.toMatchObject({ ok: true, value: { executed: true, path: 'a.ts' } });
+    expect(calls).toEqual(['status', 'diff', 'log', 'status', 'log', 'run']);
+  });
+
+  it('discovers tests through the real workspace index and previews/runs the project test command', async () => {
+    const calls: string[] = [];
+    const services = {
+      workspaceIndex: {
+        async status() {
+          calls.push('index');
+          return ok({ indexed: true, snapshot: { entries: [
+            { relativePath: 'src/a.ts', kind: 'file', language: 'typescript', isTest: false, symbols: [], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
+            { relativePath: 'src/a.test.ts', kind: 'file', language: 'typescript', isTest: true, symbols: ['works'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
+          ] } });
+        },
+      },
+      process: {
+        async previewProjectCommand() { calls.push('preview'); return ok({ executable: 'pnpm.cmd', args: ['test'] }); },
+        async startProjectCommand() { calls.push('start'); return ok({ processId: 'p1', executable: 'pnpm.cmd', args: ['test'], cwd: 'E:\\repo', state: 'running', startedAt: new Date(0).toISOString() }); },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('discover_tests', { workspaceId: 'ws' })).resolves.toMatchObject({ ok: true, value: { executed: true, tests: [{ path: 'src/a.test.ts' }] } });
+    await expect(runtime.execute('run_affected_tests', { workspaceId: 'ws' })).resolves.toMatchObject({ ok: true, value: { executed: true, dryRun: true, started: false } });
+    await expect(runtime.execute('run_affected_tests', { workspaceId: 'ws', dryRun: false, userConfirmed: true })).resolves.toMatchObject({ ok: true, value: { executed: true, started: true, process: { processId: 'p1' } } });
+    expect(calls).toEqual(['index', 'preview', 'preview', 'start']);
+  });
+
+  it('dispatches skill discovery and loading to the real extensions service', async () => {
+    const calls: string[] = [];
+    const services = {
+      extensions: {
+        async listSkills(input: unknown) { calls.push(`list:${JSON.stringify(input)}`); return ok({ skills: [{ id: 'skill-1', name: 'Smoke Skill', source: 'workspace' }] }); },
+        async readSkill(input: unknown) { calls.push(`read:${JSON.stringify(input)}`); return ok({ id: 'skill-1', content: '# Smoke Skill', source: 'workspace' }); },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('skill_match', { query: 'smoke', source: 'workspace' })).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'skill_match', status: 'ready', executed: true, skills: [{ id: 'skill-1' }] },
+    });
+    await expect(runtime.execute('skill_load', { skillId: 'skill-1' })).resolves.toMatchObject({
+      ok: true,
+      value: { tool: 'skill_load', status: 'ready', executed: true, skill: { id: 'skill-1' } },
+    });
+    expect(calls).toEqual([
+      'list:{"source":"workspace"}',
+      'read:{"skillId":"skill-1"}',
+    ]);
+  });
+
+  it('matches natural-language skill intent instead of treating the whole prompt as one substring', async () => {
+    const calls: unknown[] = [];
+    const skills = [
+      {
+        id: 'claude-skills/diagnosing-bugs',
+        name: 'diagnosing-bugs',
+        description: 'Diagnosis loop for hard bugs and performance regressions. Use when the user says diagnose or debug this.',
+        source: 'claude-skills',
+        trustTier: 'user',
+        rootPath: 'C:\\skills',
+        skillPath: 'C:\\skills\\diagnosing-bugs\\SKILL.md',
+      },
+      {
+        id: 'claude-skills/frontend-design',
+        name: 'frontend-design',
+        description: 'Use for visual frontend design work.',
+        source: 'claude-skills',
+        trustTier: 'user',
+        rootPath: 'C:\\skills',
+        skillPath: 'C:\\skills\\frontend-design\\SKILL.md',
+      },
+    ] as const;
+    const services = {
+      extensions: {
+        async listSkills(input: { readonly query?: string }) {
+          calls.push(input);
+          if (input.query !== undefined) return ok({ skills: [] });
+          return ok({ skills });
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('skill_match', {
+      query: 'diagnose the hard MCP lifecycle bug and investigate the performance regression',
+      limit: 1,
+    })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        tool: 'skill_match',
+        skills: [{ id: 'claude-skills/diagnosing-bugs' }],
+      },
+    });
+    expect(calls).toEqual([{}]);
+  });
+
+  it('pins browser and visual facades to the caller-selected DOM/CDP tab', async () => {
+    const calls: Array<{ tool: string; input: Record<string, unknown> }> = [];
+    const services = {
+      capabilities: {
+        async execute(tool: string, input: unknown) {
+          const record = input as Record<string, unknown>;
+          calls.push({ tool, input: record });
+          if (record.action === 'status') return ok({ ready: true, port: 9222 });
+          if (record.action === 'list_tabs') return ok({ tabs: [{ id: 'tab-1', title: 'App', url: 'http://localhost' }] });
+          if (record.action === 'query') return ok({ ok: true, tag: 'BODY', text: 'hello', frame: { x: 0, y: 0, width: 100, height: 100 } });
+          if (record.action === 'screenshot') return ok({ format: 'png', data_base64: 'aGVsbG8=' });
+          return ok({});
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('inspect_web_app', { tab_id: 'tab-1' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true, status: 'ready' } });
+    await expect(runtime.execute('capture_ui_state', { tab_id: 'tab-1' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true } });
+    await expect(runtime.execute('capture_screenshot', { tab_id: 'tab-1' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true } });
+    await expect(runtime.execute('dom_snapshot', { tab_id: 'tab-1' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true } });
+
+    const pageCalls = calls.filter((call) => ['query', 'screenshot'].includes(String(call.input.action)));
+    expect(pageCalls.length).toBeGreaterThan(0);
+    expect(pageCalls.every((call) => call.input.tab_id === 'tab-1')).toBe(true);
+
+    const callCountBeforeMissingTarget = calls.length;
+    await expect(runtime.execute('inspect_web_app', {}))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('tab_id') } });
+    await expect(runtime.execute('capture_screenshot', {}))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('tab_id') } });
+    const missingTargetCalls = calls.slice(callCountBeforeMissingTarget);
+    expect(missingTargetCalls.some((call) => ['query', 'screenshot'].includes(String(call.input.action)))).toBe(false);
+  });
+
+  it('recovers a stopped managed browser before running browser diagnostics', async () => {
+    const calls: string[] = [];
+    let ready = false;
+    const services = {
+      capabilities: {
+        async execute(_tool: string, input: unknown) {
+          const action = String((input as { action?: unknown }).action ?? '');
+          calls.push(action);
+          if (action === 'status') return ok({ ready, browserRunning: ready, debugPort: 9222 });
+          if (action === 'list_tabs') { ready = true; return ok({ tabs: [{ id: 'tab-1' }] }); }
+          if (action === 'query') return ok({ ok: true, text: 'body' });
+          if (action === 'screenshot') return ok({ format: 'png', data_base64: 'aGVsbG8=' });
+          throw new Error(`Unexpected browser action: ${action}`);
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    await expect(runtime.execute('browser_debug_context', { tab_id: 'tab-1' })).resolves.toMatchObject({
+      ok: true,
+      value: {
+        tool: 'browser_debug_context',
+        status: 'ready',
+        available: true,
+        ready: true,
+        executed: true,
+      },
+    });
+    expect(calls).toEqual(['status', 'list_tabs', 'status', 'list_tabs', 'query', 'screenshot']);
+  });
+
+  it('does not fake browser console/network history when the backend has no retained event stream', async () => {
+    const services = {
+      capabilities: {
+        async execute(_tool: string, input: unknown) {
+          return ok({ ready: (input as { action?: string }).action === 'status' });
+        },
+      },
+    } as unknown as McpApplicationServices;
+    const runtime = new UpgradeRuntimeService(services, actor);
+
+    for (const tool of ['network_context', 'console_context'] as const) {
+      await expect(runtime.execute(tool, {})).resolves.toMatchObject({
+        ok: true,
+        value: { status: 'needs_setup', available: false, ready: false, executed: false, requirements: expect.any(Array) },
+      });
+    }
+  });
+
+  it('performs deterministic decoded screenshot artifact comparison instead of returning metadata-only success', async () => {
+    const runtime = new UpgradeRuntimeService({}, actor);
+    await expect(runtime.execute('compare_screenshot', { baseline_base64: 'c2FtZQ==', actual_base64: 'c2FtZQ==' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true, equal: true, baseline: { sha256: expect.any(String), bytes: 4 } } });
+    await expect(runtime.execute('compare_screenshot', { baseline_base64: 'bGVmdA==', actual_base64: 'cmlnaHQ=' }))
+      .resolves.toMatchObject({ ok: true, value: { executed: true, equal: false } });
+    await expect(runtime.execute('compare_screenshot', { baseline_base64: 'not-base64', actual_base64: 'c2FtZQ==' }))
+      .resolves.toMatchObject({ ok: false, error: { code: 'INVALID_INPUT', message: expect.stringContaining('canonical base64') } });
+  });
+});

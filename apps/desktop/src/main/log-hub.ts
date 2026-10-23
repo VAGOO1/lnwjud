@@ -1,0 +1,664 @@
+import { closeSync, existsSync, openSync, readSync, statSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
+import { stripVTControlCharacters } from 'node:util';
+import type { AppErrorCode } from '@lnwjud/domain';
+import { decodeActivityTargetReference, type ActivityTargetReference } from '@lnwjud/audit';
+import { workspaceScopeMatches, type LogCorrelation, type LogLevel, type LogLine, type LogScopeRequest, type LogSnapshot, type LogSource, type TunnelLifecycleCategory, type WorkspaceSummary } from '@lnwjud/ipc-contracts';
+
+const MAX_LINES_PER_SOURCE = 10_000;
+const MAX_SEEN_KEYS_PER_SOURCE = 20_000;
+const MAX_LINE_BYTES = 8_192;
+const MAX_BYTES_PER_SOURCE = 8 * 1024 * 1024;
+const MAX_TAIL_READ_BYTES_PER_SYNC = 4 * 1024 * 1024;
+const TAIL_READ_CHUNK_BYTES = 64 * 1024;
+
+export interface LogHubOptions {
+  readonly tunnelLogPath: string;
+  readonly mcpActivityLogPath?: string;
+  readonly onLine?: (line: LogLine) => void;
+}
+
+export interface LogHubTelemetrySnapshot {
+  readonly totalLines: number;
+  readonly totalRetainedBytes: number;
+  readonly seenMcpDeliveries: number;
+  readonly mcpOccurrences: number;
+  readonly tailPendingBytes: number;
+  readonly sources: Readonly<Record<LogSource, {
+    readonly lines: number;
+    readonly retainedBytes: number;
+    readonly seenKeys: number;
+  }>>;
+}
+
+interface LogScope {
+  readonly workspaceId?: string | null;
+  readonly sessionId?: string | null;
+}
+
+interface TailedFile {
+  fd: number | null;
+  offset: number;
+  initialOffset: number | null;
+  pending: string;
+  decoder: StringDecoder;
+}
+
+export class LogHub {
+  private readonly lines = new Map<LogSource, LogLine[]>();
+  private readonly retainedBytes = new Map<LogSource, number>();
+  private readonly seenKeys = new Map<LogSource, Set<string>>();
+  private readonly seenMcpDeliveries = new Set<string>();
+  private readonly mcpOccurrences = new Map<string, Set<string>>();
+  private nextId = 1;
+  private readonly tunnelLogPath: string;
+  private readonly mcpActivityLogPath: string | undefined;
+  private onLine: ((line: LogLine) => void) | undefined;
+  private readonly tunnelFile: TailedFile = { fd: null, offset: 0, initialOffset: null, pending: '', decoder: new StringDecoder('utf8') };
+  private readonly mcpFile: TailedFile = { fd: null, offset: 0, initialOffset: null, pending: '', decoder: new StringDecoder('utf8') };
+  private tailTimer: ReturnType<typeof setInterval> | null = null;
+
+  public constructor(options: LogHubOptions) {
+    this.tunnelLogPath = options.tunnelLogPath;
+    this.mcpActivityLogPath = options.mcpActivityLogPath;
+    this.onLine = options.onLine;
+    for (const source of SOURCES) {
+      this.lines.set(source, []);
+      this.retainedBytes.set(source, 0);
+      this.seenKeys.set(source, new Set());
+    }
+  }
+
+  public setOnLine(callback: ((line: LogLine) => void) | undefined): void {
+    this.onLine = callback;
+  }
+
+  public start(options: { readonly skipExisting?: boolean } = {}): void {
+    if (this.tailTimer !== null) return;
+    if (options.skipExisting === true) {
+      this.tunnelFile.initialOffset = existingFileSize(this.tunnelLogPath);
+      if (this.mcpActivityLogPath !== undefined) this.mcpFile.initialOffset = existingFileSize(this.mcpActivityLogPath);
+    }
+    this.syncTunnelFile();
+    this.syncMcpActivityFile();
+    this.tailTimer = setInterval(() => {
+      this.syncTunnelFile();
+      this.syncMcpActivityFile();
+    }, 500);
+    this.tailTimer.unref?.();
+  }
+
+  public stop(): void {
+    if (this.tailTimer !== null) {
+      clearInterval(this.tailTimer);
+      this.tailTimer = null;
+    }
+    this.closeFd(this.tunnelFile);
+    this.closeFd(this.mcpFile);
+  }
+
+  public feed(source: LogSource, level: LogLevel, text: string, correlation?: LogCorrelation, timestamp?: string, scope?: LogScope, targetDetail?: ActivityTargetReference): void {
+    const trimmed = text.replace(/\r?\n$/, '');
+    if (trimmed.length === 0) return;
+    const normalizedCorrelation = source === 'tunnel'
+      ? tunnelCorrelation(trimmed, correlation)
+      : correlation;
+    this.append(source, { level, text: trimmed, ...(normalizedCorrelation === undefined ? {} : { correlation: normalizedCorrelation }), ...(timestamp === undefined ? {} : { timestamp }), ...(scope?.workspaceId === undefined ? {} : { workspaceId: scope.workspaceId }), ...(scope?.sessionId === undefined ? {} : { sessionId: scope.sessionId }), ...(targetDetail === undefined ? {} : { targetDetail }) });
+  }
+
+  public feedIfNew(source: LogSource, key: string, level: LogLevel, text: string, correlation?: LogCorrelation, timestamp?: string, scope?: LogScope): void {
+    if (key.length === 0) {
+      this.feed(source, level, text, correlation, timestamp, scope);
+      return;
+    }
+    const seen = this.seenKeys.get(source) ?? new Set<string>();
+    if (seen.has(key)) return;
+    seen.add(key);
+    while (seen.size > MAX_SEEN_KEYS_PER_SOURCE) {
+      const oldest = seen.values().next().value;
+      if (oldest === undefined) break;
+      seen.delete(oldest);
+    }
+    this.seenKeys.set(source, seen);
+    this.feed(source, level, text, correlation, timestamp, scope);
+  }
+
+  public syncWorkLog(entries: readonly WorkLogFeedEntry[], inFlight: readonly InFlightFeedEntry[]): void {
+    const events: WorkLogSyncEvent[] = [
+      ...entries.map((entry, order): WorkLogSyncEvent => ({ kind: 'work-log', timestamp: entry.timestamp ?? '', phase: entry.kind === 'task' ? 'started' : 'completed', order, entry })),
+      ...inFlight.map((entry, order): WorkLogSyncEvent => ({ kind: 'in-flight', timestamp: entry.startedAt, phase: 'started', order: entries.length + order, entry })),
+    ].sort(compareWorkLogEvents);
+    for (const event of events) {
+      if (event.kind === 'in-flight') {
+        const entry = event.entry;
+        this.feedMcpLifecycle(
+          'in-flight',
+          entry.startedAt,
+          'info',
+          formatInFlightLine(entry),
+          { kind: 'mcp', phase: 'started', callId: entry.callId, toolName: entry.toolName, resultCode: null },
+          entry.startedAt,
+          { workspaceId: entry.workspaceId, sessionId: entry.sessionId },
+          entry.targetDetail,
+        );
+        continue;
+      }
+      const entry = event.entry;
+      this.feedMcpLifecycle(
+        'work-log',
+        entry.id,
+        entry.level ?? classifyMcpLogLevel(entry.toolName, event.phase, entry.resultCode, entry.errorMessage ?? null),
+        formatWorkLogLine(entry),
+        { kind: 'mcp', phase: event.phase, callId: entry.callId ?? entry.id, toolName: entry.toolName, resultCode: event.phase === 'started' ? null : normalizeMcpResultCode(entry.resultCode) },
+        entry.timestamp,
+        { workspaceId: entry.workspaceId, sessionId: entry.sessionId },
+        entry.targetDetail,
+      );
+    }
+  }
+
+  public syncProcesses(summaries: readonly ProcessFeedEntry[]): void {
+    for (const summary of summaries) {
+      const key = `process:${summary.workspaceId ?? ''}:${summary.sessionId ?? ''}:${summary.id}:${summary.state}:${summary.logSummary}`;
+      this.feedIfNew(
+        'process',
+        key,
+        'info',
+        `[${summary.state}] ${summary.executable} ${summary.args.join(' ')}${summary.logSummary.length === 0 ? '' : `\n${summary.logSummary}`}`,
+        undefined,
+        undefined,
+        { workspaceId: summary.workspaceId, sessionId: summary.sessionId },
+      );
+    }
+  }
+
+  public snapshot(): LogSnapshot {
+    return {
+      lines: SOURCES.flatMap((source) => [...(this.lines.get(source) ?? [])]).sort((a, b) => a.id - b.id),
+      tunnelLogPath: this.tunnelLogPath,
+      tunnelLogExists: existsSync(this.tunnelLogPath),
+    };
+  }
+
+  public telemetrySnapshot(): LogHubTelemetrySnapshot {
+    const sources = Object.fromEntries(SOURCES.map((source) => [source, {
+      lines: this.lines.get(source)?.length ?? 0,
+      retainedBytes: this.retainedBytes.get(source) ?? 0,
+      seenKeys: this.seenKeys.get(source)?.size ?? 0,
+    }])) as Record<LogSource, { lines: number; retainedBytes: number; seenKeys: number }>;
+    return {
+      totalLines: SOURCES.reduce((total, source) => total + sources[source].lines, 0),
+      totalRetainedBytes: SOURCES.reduce((total, source) => total + sources[source].retainedBytes, 0),
+      seenMcpDeliveries: this.seenMcpDeliveries.size,
+      mcpOccurrences: this.mcpOccurrences.size,
+      tailPendingBytes: Buffer.byteLength(this.tunnelFile.pending, 'utf8') + Buffer.byteLength(this.mcpFile.pending, 'utf8'),
+      sources,
+    };
+  }
+
+  public clear(source: LogSource, scope: LogScopeRequest = {}, workspaces: readonly WorkspaceSummary[] = []): void {
+    // Clear only the visible buffer. Keep delivery/dedup cursors so historical
+    // MCP and process entries do not get rehydrated on the next dashboard sync.
+    const buffer = this.lines.get(source) ?? [];
+    if (scope.workspaceId === undefined && scope.sessionId === undefined) {
+      this.lines.set(source, []);
+      this.retainedBytes.set(source, 0);
+      return;
+    }
+    const retained = buffer.filter((line) => !matchesLogScope(line, scope, workspaces));
+    this.lines.set(source, retained);
+    this.retainedBytes.set(source, retained.reduce((bytes, line) => bytes + serializedLogLineBytes(line), 0));
+  }
+
+  private feedMcpLifecycle(
+    deliverySource: McpDeliverySource,
+    deliveryIdentity: string,
+    level: LogLevel,
+    text: string,
+    correlation: McpLogCorrelation,
+    timestamp?: string,
+    scope?: LogScope,
+    targetDetail?: ActivityTargetReference,
+  ): void {
+    const scopeIdentity = `${scope?.sessionId ?? ''}\0${scope?.workspaceId ?? ''}`;
+    const baseDeliveryIdentity = deliverySource === 'work-log' ? deliveryIdentity : `${correlation.callId}\0${deliveryIdentity}`;
+    const scopedDeliveryIdentity = `${scopeIdentity}\0${baseDeliveryIdentity}`;
+    const deliveryKey = `mcp-delivery:${deliverySource}:${correlation.phase}:${stableEventIdentity(scopedDeliveryIdentity)}`;
+    if (this.seenMcpDeliveries.has(deliveryKey)) return;
+
+    const occurrenceKey = mcpActivityKey(correlation.callId, correlation.phase, timestamp ?? deliveryIdentity, scope?.workspaceId ?? null, scope?.sessionId ?? null);
+    const deliveries = this.mcpOccurrences.get(occurrenceKey) ?? new Set<string>();
+    if (deliveries.has(deliveryKey)) return;
+    rememberBounded(this.seenMcpDeliveries, deliveryKey);
+    const hasWorkLogDelivery = [...deliveries].some((key) => key.startsWith('mcp-delivery:work-log:'));
+    const shouldAppend = deliveries.size === 0 || (deliverySource === 'work-log' && hasWorkLogDelivery);
+    rememberBounded(deliveries, deliveryKey);
+    this.mcpOccurrences.set(occurrenceKey, deliveries);
+    while (this.mcpOccurrences.size > MAX_SEEN_KEYS_PER_SOURCE) {
+      const oldest = this.mcpOccurrences.keys().next().value;
+      if (oldest === undefined) break;
+      this.mcpOccurrences.delete(oldest);
+    }
+    if (shouldAppend) {
+      this.feed('mcp', level, text, correlation, timestamp, scope, targetDetail);
+      if (isProcessActivityTool(correlation.toolName)) {
+        this.feed('process', level, text, correlation, timestamp, scope, targetDetail);
+      }
+    }
+  }
+
+  private append(source: LogSource, entry: { readonly level: LogLevel; readonly text: string; readonly workspaceId?: string | null; readonly sessionId?: string | null; readonly correlation?: LogCorrelation; readonly timestamp?: string; readonly targetDetail?: ActivityTargetReference }): void {
+    const text = truncateUtf8(stripVTControlCharacters(entry.text), MAX_LINE_BYTES);
+    if (text.length === 0) return;
+    const line: LogLine = {
+      id: this.nextId,
+      source,
+      timestamp: boundedTimestamp(entry.timestamp) ?? new Date().toISOString(),
+      level: entry.level,
+      text,
+      workspaceId: entry.workspaceId ?? null,
+      sessionId: entry.sessionId ?? null,
+      ...(entry.correlation === undefined ? {} : { correlation: entry.correlation }),
+      ...(entry.targetDetail === undefined ? {} : { targetDetail: entry.targetDetail }),
+    };
+    this.nextId += 1;
+    const buffer = this.lines.get(source) ?? [];
+    buffer.push(line);
+    let retainedBytes = (this.retainedBytes.get(source) ?? 0) + serializedLogLineBytes(line);
+    while (buffer.length > MAX_LINES_PER_SOURCE || retainedBytes > MAX_BYTES_PER_SOURCE) {
+      const removed = buffer.shift();
+      if (removed === undefined) break;
+      retainedBytes -= serializedLogLineBytes(removed);
+    }
+    this.lines.set(source, buffer);
+    this.retainedBytes.set(source, retainedBytes);
+    this.onLine?.(line);
+  }
+
+  private syncTunnelFile(): void {
+    this.tailPath(this.tunnelLogPath, this.tunnelFile, 'tunnel', (raw) => {
+      const parsed = parseTunnelLine(raw);
+      this.append('tunnel', parsed);
+    });
+  }
+
+  private syncMcpActivityFile(): void {
+    const activityPath = this.mcpActivityLogPath;
+    if (activityPath === undefined) return;
+    this.tailPath(activityPath, this.mcpFile, 'mcp', (raw) => {
+      const parsed = parseMcpActivityLine(raw);
+      if (parsed === null) return;
+      this.feedMcpLifecycle('activity-file', parsed.key, parsed.level, parsed.text, parsed.correlation, parsed.timestamp, { workspaceId: parsed.workspaceId, sessionId: parsed.sessionId }, parsed.targetDetail);
+    });
+  }
+
+  private tailPath(filePath: string, state: TailedFile, source: LogSource, onRaw: (raw: string) => void): void {
+    try {
+      const stat = statSync(filePath);
+      const size = stat.size;
+      if (state.fd === null) {
+        state.fd = openSync(filePath, 'r');
+        state.offset = state.initialOffset ?? Math.max(0, size - MAX_TAIL_READ_BYTES_PER_SYNC);
+        state.initialOffset = null;
+        state.pending = '';
+        state.decoder = new StringDecoder('utf8');
+      }
+      if (size < state.offset) {
+        state.offset = 0;
+        state.pending = '';
+        state.decoder = new StringDecoder('utf8');
+      }
+      if (size === state.offset) return;
+      const readEnd = Math.min(size, state.offset + MAX_TAIL_READ_BYTES_PER_SYNC);
+      while (state.offset < readEnd) {
+        const chunk = Buffer.alloc(Math.min(readEnd - state.offset, TAIL_READ_CHUNK_BYTES));
+        const read = readSync(state.fd, chunk, 0, chunk.length, state.offset);
+        state.offset += read;
+        if (read <= 0) return;
+        const text = state.pending + state.decoder.write(chunk.subarray(0, read));
+        const records = text.split(/\r?\n/);
+        state.pending = truncateUtf8(records.pop() ?? '', MAX_LINE_BYTES);
+        for (const raw of records) {
+          const trimmed = raw.trim();
+          if (trimmed.length === 0) continue;
+          onRaw(trimmed);
+        }
+      }
+    } catch (error: unknown) {
+      this.closeFd(state);
+      if (!isMissingFileError(error)) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.feedIfNew(
+          source,
+          `tail-error:${filePath}:${message}`,
+          'error',
+          `Unable to tail log file ${filePath}: ${message}`,
+        );
+      }
+    }
+  }
+
+  private closeFd(state: TailedFile): void {
+    if (state.fd !== null) {
+      try {
+        closeSync(state.fd);
+      } catch {
+        // Best effort.
+      }
+      state.fd = null;
+    }
+    state.offset = 0;
+    state.pending = '';
+    state.decoder = new StringDecoder('utf8');
+  }
+}
+
+const SOURCES: readonly LogSource[] = ['tunnel', 'mcp', 'process'];
+
+function serializedLogLineBytes(line: LogLine): number {
+  return Buffer.byteLength(JSON.stringify(line), 'utf8');
+}
+
+function truncateUtf8(text: string, maxBytes: number): string {
+  const bytes = Buffer.from(text, 'utf8');
+  if (bytes.length <= maxBytes) return text;
+  let end = maxBytes;
+  while (end > 0 && (bytes[end]! & 0b1100_0000) === 0b1000_0000) end -= 1;
+  return bytes.subarray(0, end).toString('utf8');
+}
+
+export interface WorkLogFeedEntry {
+  readonly id: string;
+  readonly timestamp?: string;
+  readonly kind: 'task' | 'result' | 'error';
+  readonly level?: LogLevel;
+  readonly toolName: string;
+  readonly resultCode: string;
+  readonly errorMessage?: string | null;
+  readonly targetSummary: string | null;
+  readonly targetDetail?: ActivityTargetReference;
+  readonly workspaceId: string | null;
+  readonly sessionId: string | null;
+  readonly callId?: string;
+}
+
+export interface InFlightFeedEntry {
+  readonly callId: string;
+  readonly toolName: string;
+  readonly targetSummary: string | null;
+  readonly targetDetail?: ActivityTargetReference;
+  readonly startedAt: string;
+  readonly workspaceId: string | null;
+  readonly sessionId: string | null;
+}
+
+export interface ProcessFeedEntry {
+  readonly id: string;
+  readonly workspaceId: string | null;
+  readonly sessionId: string | null;
+  readonly executable: string;
+  readonly args: readonly string[];
+  readonly state: string;
+  readonly logSummary: string;
+}
+
+export function isProcessActivityTool(toolName: string): boolean {
+  return /^(?:process_|task_|project_dev$|project_test$|project_lint$|project_typecheck$|project_build$|shell$|wsl_exec$|verify_incremental$)/.test(toolName);
+}
+
+type WorkLogSyncEvent =
+  | { readonly kind: 'work-log'; readonly timestamp: string; readonly phase: 'started' | 'completed'; readonly order: number; readonly entry: WorkLogFeedEntry }
+  | { readonly kind: 'in-flight'; readonly timestamp: string; readonly phase: 'started'; readonly order: number; readonly entry: InFlightFeedEntry };
+type McpDeliverySource = 'work-log' | 'in-flight' | 'activity-file';
+type McpLogCorrelation = Extract<LogCorrelation, { readonly kind: 'mcp' }>;
+
+function compareWorkLogEvents(left: WorkLogSyncEvent, right: WorkLogSyncEvent): number {
+  const timestampOrder = left.timestamp.localeCompare(right.timestamp);
+  if (timestampOrder !== 0) return timestampOrder;
+  if (left.phase !== right.phase) return left.phase === 'started' ? -1 : 1;
+  if (left.kind !== right.kind) return left.kind === 'work-log' ? -1 : 1;
+  return left.order - right.order;
+}
+
+export function mcpActivityKey(
+  callId: string,
+  phase: 'started' | 'completed',
+  eventIdentity = '',
+  workspaceId: string | null = null,
+  sessionId: string | null = null,
+): string {
+  return `mcp:${phase}:${stableEventIdentity(`${sessionId ?? ''}\0${workspaceId ?? ''}\0${callId}\0${eventIdentity}`)}`;
+}
+
+function formatInFlightLine(entry: InFlightFeedEntry): string {
+  return `[TASK] ${entry.toolName} callId=${entry.callId}${entry.targetSummary === null || entry.targetSummary === undefined ? '' : ` ${entry.targetSummary}`} — in flight`;
+}
+
+function formatWorkLogLine(entry: WorkLogFeedEntry): string {
+  return `${entry.kind === 'task' ? '[TASK]' : '[RESULT]'} ${entry.toolName} ${entry.resultCode}${entry.callId === undefined || entry.callId.length === 0 ? '' : ` callId=${entry.callId}`}${entry.errorMessage === null || entry.errorMessage === undefined || entry.errorMessage.length === 0 ? '' : ` — ${entry.errorMessage}`}${entry.targetSummary === null ? '' : ` — ${entry.targetSummary}`}`;
+}
+
+function parseTunnelLine(raw: string): { readonly level: LogLevel; readonly text: string; readonly timestamp?: string; readonly correlation: LogCorrelation } {
+  const json = tryParseJson(raw);
+  if (json !== null && typeof json === 'object') {
+    const record = json as Record<string, unknown>;
+    const level = typeof record.level === 'string' ? record.level.toLowerCase() : '';
+    const message = typeof record.msg === 'string'
+      ? record.msg
+      : typeof record.message === 'string'
+        ? record.message
+        : raw;
+    const instanceId = stringRecordField(record, ['instance_id', 'instanceId']);
+    const requestId = stringRecordField(record, ['request_id', 'requestId']);
+    const pid = typeof record.pid === 'number' && Number.isInteger(record.pid) ? record.pid : undefined;
+    const lifecycleFields = structuredLifecycleFields(record);
+    const lifecycle = lifecycleFields.length === 0
+      ? normalizeTunnelLifecycle(message)
+      : normalizeStructuredTunnelLifecycle(lifecycleFields);
+    const timestamp = boundedTimestamp(record.timestamp) ?? boundedTimestamp(record.time);
+    return { level: level.includes('error') ? 'error' : level.includes('warn') ? 'warn' : 'info', text: message.slice(0, MAX_LINE_BYTES), ...(timestamp === undefined ? {} : { timestamp }), correlation: { kind: 'tunnel', lifecycle, ...(instanceId === undefined ? {} : { instanceId }), ...(requestId === undefined ? {} : { requestId }), ...(pid === undefined ? {} : { pid }) } };
+  }
+  const lowered = raw.toLowerCase();
+  return {
+    level: /\berror\b/.test(lowered) ? 'error' : /\bwarn(ing)?\b/.test(lowered) ? 'warn' : 'info',
+    text: raw.slice(0, MAX_LINE_BYTES),
+    correlation: { kind: 'tunnel', lifecycle: normalizeTunnelLifecycle(raw) },
+  };
+}
+
+function parseMcpActivityLine(raw: string): { readonly key: string; readonly level: LogLevel; readonly text: string; readonly workspaceId: string | null; readonly sessionId: string | null; readonly timestamp?: string; readonly correlation: McpLogCorrelation; readonly targetDetail: ActivityTargetReference } | null {
+  const json = tryParseJson(raw);
+  if (json === null || typeof json !== 'object') return null;
+  const record = json as Record<string, unknown>;
+  const callId = typeof record.callId === 'string' ? record.callId : '';
+  const toolName = typeof record.toolName === 'string' ? record.toolName : 'unknown';
+  const phase = record.phase === 'completed' ? 'completed' : 'started';
+  const resultCode = typeof record.resultCode === 'string' ? record.resultCode : phase === 'started' ? 'STARTED' : 'UNKNOWN';
+  const targetSummary = typeof record.targetSummary === 'string' ? record.targetSummary : null;
+  const targetDetail = decodeActivityTargetReference(record.targetDetail, targetSummary ?? undefined);
+  const resultMessage = typeof record.resultMessage === 'string' ? record.resultMessage : null;
+  const workspaceId = boundedScopeValue(record.workspaceId);
+  const sessionId = boundedScopeValue(record.sessionId);
+  const timestamp = boundedTimestamp(record.timestamp);
+  const kind = classifyMcpWorkLogKind(toolName, phase, resultCode);
+  const level = classifyMcpLogLevel(toolName, phase, resultCode, resultMessage);
+  return {
+    key: mcpActivityKey(callId.length > 0 ? callId : 'unknown', phase, timestamp ?? raw.slice(0, 160), workspaceId, sessionId),
+    level,
+    text: formatWorkLogLine({
+      id: callId,
+      kind,
+      toolName,
+      resultCode,
+      errorMessage: resultMessage,
+      targetSummary,
+      workspaceId,
+      sessionId,
+      callId,
+    }),
+    workspaceId,
+    sessionId,
+    correlation: { kind: 'mcp', phase, callId, toolName, resultCode: phase === 'started' ? null : normalizeMcpResultCode(resultCode) },
+    targetDetail,
+    ...(timestamp === undefined ? {} : { timestamp }),
+  };
+}
+
+export function normalizeTunnelLifecycle(value: string): TunnelLifecycleCategory {
+  const normalized = value.toLowerCase().replace(/[_./:-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (/\bttl\b(?:\s+\w+){0,3}\s+(?:reached|expired|exceeded)\b/.test(normalized)) return 'ttl_expired';
+  if (/\bstdio\s+(?:mcp(?:\s+(?:command|process))?|command|process)\s+(?:(?:is|was|has been)\s+)?(?:exited|closed|terminated|stopped)\b/.test(normalized)) return 'stdio_stopped';
+  if (/\b(?:requesting\s+)?(?:tunnel(?:\s+client)?|control\s+plane|websocket\s+connection)(?:\s+connection)?\s+(?:(?:is|was|has been)\s+)?(?:shutdown|shutting\s+down|stopping|stopped|disconnected|disconnecting)\b/.test(normalized)) return 'transport_stopped';
+  if (/\b(?:tunnel(?:\s+client)?|control\s+plane|websocket\s+connection)(?:\s+connection)?\s+(?:(?:is|was|has been)\s+)?(?:connected|reconnected|running|live)\b/.test(normalized)) return 'transport_live';
+  return 'other';
+}
+
+function normalizeStructuredTunnelLifecycle(values: readonly string[]): TunnelLifecycleCategory {
+  for (const value of values) {
+    const category = normalizeTunnelLifecycle(value);
+    if (category !== 'other') return category;
+    const normalized = value.toLowerCase().replace(/[_./:-]+/g, ' ').replace(/\s+/g, ' ').trim();
+    if (/^(?:shutdown|shutting down|stopping|stopped|disconnected|disconnecting)$/.test(normalized)) return 'transport_stopped';
+    if (/^(?:connected|reconnected|running|live)$/.test(normalized)) return 'transport_live';
+  }
+  return 'other';
+}
+
+function tunnelCorrelation(text: string, correlation: LogCorrelation | undefined): LogCorrelation {
+  if (correlation?.kind === 'tunnel') {
+    return { ...correlation, lifecycle: correlation.lifecycle ?? normalizeTunnelLifecycle(text) };
+  }
+  return { kind: 'tunnel', lifecycle: normalizeTunnelLifecycle(text) };
+}
+
+function structuredLifecycleFields(record: Readonly<Record<string, unknown>>): string[] {
+  const values: string[] = [];
+  for (const [key, value] of Object.entries(record)) {
+    if (!['event', 'status', 'reason'].includes(key.toLowerCase()) || typeof value !== 'string') continue;
+    values.push(value.slice(0, MAX_LINE_BYTES));
+  }
+  return values;
+}
+
+function boundedScopeValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim().length > 0 && value.length <= 256 ? value : null;
+}
+
+function boundedTimestamp(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128 ? value : undefined;
+}
+
+function stableEventIdentity(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function rememberBounded(values: Set<string>, value: string): void {
+  values.add(value);
+  while (values.size > MAX_SEEN_KEYS_PER_SOURCE) {
+    const oldest = values.values().next().value;
+    if (oldest === undefined) break;
+    values.delete(oldest);
+  }
+}
+
+function matchesLogScope(line: Pick<LogLine, 'workspaceId' | 'sessionId'>, scope: LogScopeRequest, workspaces: readonly WorkspaceSummary[]): boolean {
+  if (scope.workspaceId !== undefined && !workspaceScopeMatches(workspaces, line.workspaceId, scope.workspaceId)) return false;
+  if (scope.sessionId !== undefined && line.sessionId !== scope.sessionId) return false;
+  return true;
+}
+
+export function classifyMcpWorkLogKind(_toolName: string, phase: 'started' | 'completed', resultCode: string): 'task' | 'result' | 'error' {
+  void resultCode;
+  return phase === 'started' ? 'task' : 'result';
+}
+
+const RECOVERABLE_MCP_RESULT_CODES = new Set([
+  'PERMISSION_REQUIRED',
+  'PERMISSION_DENIED',
+  'SECRET_ACCESS_DENIED',
+  'CONFLICT',
+  'PATH_OUTSIDE_WORKSPACE',
+  'ENGINEERING_PREFLIGHT_REQUIRED',
+  'ENGINEERING_POLICY_CHANGED',
+]);
+
+const INVALID_INPUT_WARNING_TOOL = /^(?:get_|list_|search_|find_|read_|process_(?:status|logs|context)|service_context|task_create|checkpoint_goal|update_goal_plan|claim_scheduled_continuation|prepare_scheduled_continuation|record_scheduled_continuation_receipt|cancel_scheduled_continuation|session_handoff|engineering_(?:start_task|prepare_task))/;
+const GENERIC_DIAGNOSTIC_WARNING_TOOL = /^(?:process_context|service_context)$/;
+
+export function classifyMcpLogLevel(
+  toolName: string,
+  phase: 'started' | 'completed',
+  resultCode: string,
+  resultMessage: string | null = null,
+): LogLevel {
+  if (phase === 'started') return 'info';
+  const normalized = resultCode.toUpperCase();
+  if (normalized === 'SUCCESS' || normalized === 'STARTED') return 'info';
+  if (RECOVERABLE_MCP_RESULT_CODES.has(normalized)) return 'warn';
+  if (normalized === 'PROCESS_NOT_FOUND' && /^(?:process_status|process_logs|process_context)$/.test(toolName)) return 'warn';
+  if (normalized === 'INVALID_INPUT' && INVALID_INPUT_WARNING_TOOL.test(toolName)) return 'warn';
+  if (normalized === 'INTERNAL_ERROR' && GENERIC_DIAGNOSTIC_WARNING_TOOL.test(toolName)
+    && /^Operation failed$/i.test((resultMessage ?? '').trim())) return 'warn';
+  if (toolName === 'shell' && /^(?:INVALID_INPUT|PROCESS_NOT_FOUND)$/.test(normalized)
+    && /\btask\b.*\b(?:not owned|not found|not running|expired)\b/i.test(resultMessage ?? '')) return 'warn';
+  return 'error';
+}
+
+function normalizeMcpResultCode(value: string): 'SUCCESS' | 'FAILED' | 'FATAL' | 'UNKNOWN' {
+  const normalized = value.toUpperCase();
+  if (normalized === 'SUCCESS') return 'SUCCESS';
+  if (normalized === 'FATAL') return 'FATAL';
+  if (Object.prototype.hasOwnProperty.call(MCP_FAILURE_RESULT_CODES, normalized)) return 'FAILED';
+  return 'UNKNOWN';
+}
+
+const MCP_FAILURE_RESULT_CODES = {
+  INVALID_INPUT: true,
+  CONFLICT: true,
+  WORKSPACE_NOT_FOUND: true,
+  PATH_OUTSIDE_WORKSPACE: true,
+  SECRET_ACCESS_DENIED: true,
+  PERMISSION_DENIED: true,
+  PERMISSION_REQUIRED: true,
+  ENGINEERING_PREFLIGHT_REQUIRED: true,
+  ENGINEERING_POLICY_CHANGED: true,
+  FILE_NOT_FOUND: true,
+  FILE_TOO_LARGE: true,
+  BINARY_FILE: true,
+  PROCESS_NOT_FOUND: true,
+  PROCESS_TIMEOUT: true,
+  EXECUTABLE_NOT_FOUND: true,
+  GIT_NOT_REPOSITORY: true,
+  CODEX_NOT_AVAILABLE: true,
+  UNSUPPORTED_PLATFORM: true,
+  INTERNAL_ERROR: true,
+  FAILED: true,
+  CHILD_FAILED: true,
+  DEPENDENCY_FAILED: true,
+} as const satisfies Record<AppErrorCode | 'FAILED' | 'CHILD_FAILED' | 'DEPENDENCY_FAILED', true>;
+
+function stringRecordField(record: Record<string, unknown>, keys: readonly string[]): string | undefined {
+  for (const key of keys) if (typeof record[key] === 'string' && (record[key] as string).length <= 128) return record[key] as string;
+  return undefined;
+}
+
+function existingFileSize(filePath: string): number | null {
+  try {
+    return statSync(filePath).size;
+  } catch {
+    return null;
+  }
+}
+
+function isMissingFileError(error: unknown): boolean {
+  return typeof error === 'object' && error !== null && 'code' in error && (error as { code?: unknown }).code === 'ENOENT';
+}
+
+function tryParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return null;
+  }
+}

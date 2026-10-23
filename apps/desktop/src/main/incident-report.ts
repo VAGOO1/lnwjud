@@ -1,0 +1,515 @@
+import { randomUUID } from 'node:crypto';
+import { rename, unlink, writeFile } from 'node:fs/promises';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+import type { IncidentClassification, LogLine, TunnelLifecycleCategory, TunnelStatus } from '@lnwjud/ipc-contracts';
+import { DEFAULT_DISPLAY_TIME_ZONE, formatOffsetIsoTimestamp } from '@lnwjud/shared/date-time-display';
+import type { CrashEventHistoryRecord } from './crash-recovery.js';
+import type { DesktopSessionSnapshot } from './desktop-session-diagnostics.js';
+import type { NativeCrashDumpMetadata } from './native-crash-diagnostics.js';
+import type { RuntimeDiagnosticsHistory } from './runtime-diagnostics-history.js';
+import type { TunnelIncidentRuntimeDiagnostics } from './tunnel-controller.js';
+
+const execFileAsync = promisify(execFile);
+const MAX_ENTRIES = 200;
+const MAX_TEXT = 512;
+const MAX_IDS = 50;
+const SENSITIVE_KEY = '(?:access[_-]?token|refresh[_-]?token|id[_-]?token|auth[_-]?token|authorization[_-]?code|code[_-]?verifier|pkce[_-]?verifier|x[_-]?api[_-]?key|api[_-]?key|client[_-]?secret|authorization|password|token|secret)';
+const OAUTH_QUERY_SECRET_VALUE = /([?&](?:code|authorization_code|code_verifier|pkce_verifier)=)[^&#\s]+/gi;
+const AUTHORIZATION_VALUE = /\bauthorization\s*[:=]\s*[a-z][a-z0-9._~-]*\s+[^\r\n,;]+/gi;
+const JSON_SECRET_VALUE = new RegExp(`("${SENSITIVE_KEY}"\\s*:\\s*)(?:"(?:\\\\.|[^"\\\\])*"|[^,}\\]\\r\\n]*)`, 'gi');
+const ASSIGNED_SECRET_VALUE = new RegExp(`(^|[?&\\s;,{])(${SENSITIVE_KEY})(\\s*[:=]\\s*)(?:"(?:\\\\.|[^"\\\\])*"|'[^']*'|[^\\r\\n,;&}\\]]+)`, 'gi');
+const PREFIXED_ENV_SECRET_VALUE = /(^|[?&\s;,{])([a-z][a-z0-9]*(?:_[a-z0-9]+)*_(?:access_token|refresh_token|id_token|auth_token|x_api_key|api_key|client_secret|password|token|secret))(\s*=\s*)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\r\n,;&}\]]+)/gi;
+const CLI_SECRET_VALUE = /(^|\s)(--(?:api-key|token|access-token|refresh-token|id-token|auth-token|client-secret))(?:\s*=\s*|\s+)(?:"(?:\\.|[^"\\])*"|'[^']*'|[^\s,;]+)/gi;
+const KNOWN_SECRET_PREFIX = /\b(?:sk-[A-Za-z0-9_-]+|gh[pousr]_[A-Za-z0-9_]+|xox[baprs]-[A-Za-z0-9-]+|AIza[A-Za-z0-9_-]+)\b/g;
+const PREVIOUS_SESSION_RELEVANCE_MS = 10 * 60 * 1000;
+
+export type TunnelHealthState = 'live' | 'unhealthy' | 'unavailable' | 'unknown';
+export interface IncidentHealth { readonly state: TunnelHealthState; readonly message: string | null; }
+export interface IncidentDesktopMemory {
+  readonly capturedAt: string;
+  readonly main: { readonly rssBytes: number; readonly heapTotalBytes: number; readonly heapUsedBytes: number; readonly externalBytes: number; readonly arrayBuffersBytes: number };
+  readonly processes: readonly { readonly pid: number; readonly type: string; readonly name: string | null; readonly creationTime: number; readonly percentCPUUsage: number; readonly idleWakeupsPerSecond: number; readonly workingSetBytes: number | null; readonly peakWorkingSetBytes: number | null; readonly privateBytes: number | null }[];
+  readonly totalWorkingSetBytes: number;
+}
+type IncidentLine = Pick<LogLine, 'source' | 'text' | 'timestamp' | 'correlation'> & { readonly id?: number };
+export interface IncidentEvidence {
+  readonly triggeredByUser: boolean;
+  readonly appVersion: string;
+  readonly tunnelClientVersion: string | null;
+  readonly tunnelClientVersionReason?: string | null;
+  readonly tunnel: Pick<TunnelStatus, 'state' | 'source'> & { readonly message?: string | null; readonly health: IncidentHealth };
+  readonly updaterEvents: readonly string[];
+  readonly logLines: readonly IncidentLine[];
+  readonly crashEvents?: readonly CrashEventHistoryRecord[];
+  readonly desktopSession?: DesktopSessionSnapshot;
+  readonly crashDumps?: NativeCrashDumpMetadata;
+  readonly desktopMemory?: IncidentDesktopMemory;
+  readonly runtimeHistory?: RuntimeDiagnosticsHistory;
+  readonly runtimeDiagnostics?: TunnelIncidentRuntimeDiagnostics;
+  readonly relevantPids?: readonly number[];
+  readonly relevantPidUnavailableReason?: string;
+  readonly collectProcessTree?: (pids: readonly number[]) => Promise<readonly IncidentProcess[]>;
+  readonly collectListeners?: (pids: readonly number[]) => Promise<readonly IncidentListener[]>;
+}
+export interface IncidentProcess { readonly pid: number; readonly parentPid: number | null; readonly executable: string; }
+export interface IncidentListener { readonly pid: number; readonly address: string; readonly port: number; readonly owner?: string; }
+export type IncidentCompletionState = 'success' | 'failure' | 'unknown' | 'conflict';
+export interface IncidentCall { readonly callId: string; readonly toolName: string | null; readonly resultCode: 'SUCCESS' | 'FAILED' | 'FATAL' | 'UNKNOWN' | null; readonly completionState: IncidentCompletionState; readonly incomplete: boolean; readonly startedWithoutCompletion: boolean; readonly completionWithoutStart: boolean; readonly sourceSequence: number; readonly lastEvidenceSequence: number; readonly startedAt: string | null; readonly completedAt: string | null; }
+
+export interface IncidentTransportDiagnostics {
+  readonly webSocketCloseCode: number | null;
+  readonly httpStatus: number | null;
+  readonly networkError: { readonly code: string | null; readonly category: 'connection_reset' | 'timeout' | 'dns' | 'tls' | 'connection_refused' | 'http' | 'unknown'; readonly message: string; readonly timestamp: string | null } | null;
+  readonly lastDisconnectAt: string | null;
+  readonly evidenceSources: readonly ('process_stderr' | 'tunnel_log')[];
+}
+export interface IncidentReport {
+  readonly schemaVersion: 3;
+  readonly capturedAt: string;
+  readonly timeZone: string;
+  readonly appVersion: string;
+  readonly tunnelClientVersion: string | null;
+  readonly tunnelClientVersionReason: string | null;
+  readonly classification: IncidentClassification;
+  readonly classificationReasons: readonly string[];
+  readonly updaterEventTail: readonly { readonly category: 'checking-for-update' | 'update-available' | 'update-not-available' | 'update-downloaded' | 'error'; readonly version?: string }[];
+  readonly tunnel: {
+    readonly state: TunnelStatus['state'];
+    readonly source: TunnelStatus['source'];
+    readonly instanceIds: readonly string[];
+    readonly requestIds: readonly string[];
+    readonly health: IncidentHealth;
+  };
+  readonly runtimeDiagnostics: TunnelIncidentRuntimeDiagnostics | null;
+  readonly transport: IncidentTransportDiagnostics;
+  readonly mcpCalls: readonly IncidentCall[];
+  readonly desktopCrashEventTail: readonly CrashEventHistoryRecord[];
+  readonly desktopSession?: DesktopSessionSnapshot;
+  readonly crashDumps?: NativeCrashDumpMetadata;
+  readonly desktopMemory?: IncidentDesktopMemory;
+  readonly runtimeHistory?: RuntimeDiagnosticsHistory;
+  readonly tunnelLogTail: readonly { readonly timestamp: string; readonly lifecycle: TunnelLifecycleCategory; readonly message: string; readonly instanceId?: string; readonly requestId?: string }[];
+  readonly processTree: { readonly available: boolean; readonly entries: readonly { readonly pid: number; readonly parentPid: number | null; readonly executable: string }[]; readonly error?: string };
+  readonly tcpListeners: { readonly available: boolean; readonly entries: readonly { readonly pid: number; readonly address: string; readonly port: number }[]; readonly error?: string };
+}
+
+export function classifyIncident(evidence: Pick<IncidentEvidence, 'triggeredByUser' | 'tunnel' | 'logLines' | 'desktopSession'>): { readonly classification: IncidentClassification; readonly reasons: readonly string[] } {
+  const latestCall = pairMcpCalls(evidence.logLines).reduce<IncidentCall | undefined>((latest, call) => latest === undefined || call.lastEvidenceSequence >= latest.lastEvidenceSequence ? call : latest, undefined);
+  if (latestCall?.completionState === 'failure' && !latestCall.incomplete) return { classification: 'local_tool_failed', reasons: ['latest_structured_mcp_terminal_failed'] };
+  let latestFailure = -1;
+  let latestRecovery = -1;
+  for (const [index, line] of evidence.logLines.entries()) {
+    if (line.source !== 'tunnel' || line.correlation?.kind !== 'tunnel') continue;
+    const sequence = sourceSequence(line, index);
+    if (line.correlation.lifecycle === 'transport_live') latestRecovery = Math.max(latestRecovery, sequence);
+    else if (line.correlation.lifecycle !== undefined && line.correlation.lifecycle !== 'other') latestFailure = Math.max(latestFailure, sequence);
+  }
+  const currentlyFailed = evidence.tunnel.state === 'stopped' || evidence.tunnel.state === 'error' || evidence.tunnel.health.state === 'unhealthy';
+  const explicitlyRecovered = latestFailure >= 0
+    && latestRecovery > latestFailure
+    && latestCall?.completionState === 'success'
+    && !latestCall.incomplete
+    && latestCall.lastEvidenceSequence > latestFailure
+    && evidence.tunnel.state === 'running'
+    && evidence.tunnel.health.state === 'live';
+  if (currentlyFailed || (latestFailure >= 0 && !explicitlyRecovered)) return { classification: 'tunnel_disconnected', reasons: ['explicit_tunnel_disconnect_evidence'] };
+  const previousSession = evidence.desktopSession?.previous;
+  if (previousSession !== null && previousSession !== undefined && previousSession.state !== 'clean_exit' && previousSessionStillRelevant(evidence.desktopSession)) {
+    return { classification: 'desktop_session_ended_uncleanly', reasons: [`previous_desktop_session_${previousSession.state}`] };
+  }
+  if (evidence.triggeredByUser && latestCall?.completionState === 'success' && !latestCall.incomplete && evidence.tunnel.state === 'running' && evidence.tunnel.health.state === 'live') return { classification: 'remote_turn_stopped', reasons: ['manual_capture_after_structured_success_with_live_tunnel'] };
+  return { classification: 'healthy_or_inconclusive', reasons: [evidence.tunnel.state === 'starting' ? 'tunnel_starting' : evidence.tunnel.health.state === 'unavailable' ? 'tunnel_health_unavailable' : 'insufficient_non_conflicting_evidence'] };
+}
+
+function previousSessionStillRelevant(snapshot: DesktopSessionSnapshot | undefined): boolean {
+  if (snapshot === undefined || snapshot.previous === null || snapshot.previous.state === 'clean_exit') return false;
+  const startedAt = Date.parse(snapshot.current.startedAt);
+  const lastHeartbeatAt = Date.parse(snapshot.current.lastHeartbeatAt);
+  if (!Number.isFinite(startedAt) || !Number.isFinite(lastHeartbeatAt) || lastHeartbeatAt < startedAt) return true;
+  return lastHeartbeatAt - startedAt <= PREVIOUS_SESSION_RELEVANCE_MS;
+}
+
+export function pairMcpCalls(lines: readonly IncidentLine[]): readonly IncidentCall[] {
+  const calls: MutableIncidentCall[] = [];
+  const pending = new Map<string, number[]>();
+  const lastClosed = new Map<string, number>();
+  const seenEvents = new Set<string>();
+  for (const [index, line] of lines.entries()) {
+    if (line.source !== 'mcp') continue;
+    const correlation = line.correlation;
+    if (correlation?.kind !== 'mcp') continue;
+    const identity = mcpEvidenceIdentity(line, correlation);
+    if (seenEvents.has(identity)) continue;
+    seenEvents.add(identity);
+    const rawCallId = correlation.callId;
+    const callId = safe(rawCallId);
+    const sequence = sourceSequence(line, index);
+    const eventTimestamp = safe(line.timestamp);
+    if (correlation.phase === 'started') {
+      const callIndex = calls.push({
+        callId,
+        toolName: safe(correlation.toolName),
+        resultCode: null,
+        completionState: 'unknown',
+        incomplete: true,
+        startedWithoutCompletion: true,
+        completionWithoutStart: false,
+        sourceSequence: sequence,
+        lastEvidenceSequence: sequence,
+        startedAt: eventTimestamp,
+        completedAt: null,
+      }) - 1;
+      const queue = pending.get(rawCallId) ?? [];
+      queue.push(callIndex);
+      pending.set(rawCallId, queue);
+      continue;
+    }
+
+    const queue = pending.get(rawCallId);
+    const callIndex = queue?.shift();
+    if (queue !== undefined && queue.length === 0) pending.delete(rawCallId);
+    if (callIndex !== undefined) {
+      const call = calls[callIndex]!;
+      const result = completionResult(correlation.resultCode);
+      call.resultCode = result.resultCode;
+      call.completionState = result.completionState;
+      call.incomplete = result.completionState === 'unknown';
+      call.startedWithoutCompletion = false;
+      call.lastEvidenceSequence = sequence;
+      call.completedAt = eventTimestamp;
+      lastClosed.set(rawCallId, callIndex);
+      continue;
+    }
+
+    const closedIndex = lastClosed.get(rawCallId);
+    if (closedIndex !== undefined) {
+      const closed = calls[closedIndex]!;
+      closed.resultCode = 'UNKNOWN';
+      closed.completionState = 'conflict';
+      closed.incomplete = true;
+      closed.lastEvidenceSequence = sequence;
+      continue;
+    }
+
+    const result = completionResult(correlation.resultCode);
+    calls.push({
+      callId,
+      toolName: safe(correlation.toolName),
+      resultCode: result.resultCode,
+      completionState: result.completionState,
+      incomplete: true,
+      startedWithoutCompletion: false,
+      completionWithoutStart: true,
+      sourceSequence: sequence,
+      lastEvidenceSequence: sequence,
+      startedAt: null,
+      completedAt: eventTimestamp,
+    });
+  }
+  return calls.slice(-MAX_ENTRIES);
+}
+
+interface MutableIncidentCall {
+  callId: string;
+  toolName: string | null;
+  resultCode: IncidentCall['resultCode'];
+  completionState: IncidentCompletionState;
+  incomplete: boolean;
+  startedWithoutCompletion: boolean;
+  completionWithoutStart: boolean;
+  sourceSequence: number;
+  lastEvidenceSequence: number;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export function parseTunnelCorrelations(lines: readonly IncidentLine[]): { readonly instanceIds: readonly string[]; readonly requestIds: readonly string[] } {
+  const instanceIds = new Set<string>(); const requestIds = new Set<string>();
+  for (const line of lines.slice(-MAX_ENTRIES)) { if (line.source !== 'tunnel') continue; if (line.correlation?.kind === 'tunnel') { if (line.correlation.instanceId !== undefined) instanceIds.add(safe(line.correlation.instanceId)); if (line.correlation.requestId !== undefined) requestIds.add(safe(line.correlation.requestId)); } for (const match of line.text.matchAll(/\b(?:instance[_-]?id|instance)[=:]([A-Za-z0-9._:-]{1,128})/ig)) instanceIds.add(safe(match[1]!)); for (const match of line.text.matchAll(/\b(?:request[_-]?id|request)[=:]([A-Za-z0-9._:-]{1,128})/ig)) requestIds.add(safe(match[1]!)); }
+  return { instanceIds: [...instanceIds].slice(-MAX_IDS), requestIds: [...requestIds].slice(-MAX_IDS) };
+}
+
+function localIncidentTimestamp(value: string | null): string | null {
+  if (value === null) return null;
+  if (Number.isNaN(Date.parse(value))) return safe(value);
+  return formatOffsetIsoTimestamp(value, DEFAULT_DISPLAY_TIME_ZONE);
+}
+
+function localizeIncidentCall(call: IncidentCall): IncidentCall {
+  return {
+    ...call,
+    startedAt: localIncidentTimestamp(call.startedAt),
+    completedAt: localIncidentTimestamp(call.completedAt),
+  };
+}
+
+function localizeRuntimeDiagnostics(value: TunnelIncidentRuntimeDiagnostics | undefined): TunnelIncidentRuntimeDiagnostics | null {
+  if (value === undefined) return null;
+  return {
+    process: {
+      ...value.process,
+      lastProcessStartedAt: localIncidentTimestamp(value.process.lastProcessStartedAt),
+      lastExitAt: localIncidentTimestamp(value.process.lastExitAt),
+    },
+    restart: {
+      ...value.restart,
+      lastScheduledAt: localIncidentTimestamp(value.restart.lastScheduledAt),
+      lastStartedAt: localIncidentTimestamp(value.restart.lastStartedAt),
+      lastCompletedAt: localIncidentTimestamp(value.restart.lastCompletedAt),
+    },
+    auth: value.auth === null ? null : {
+      ...value.auth,
+      lastRefreshStartedAt: localIncidentTimestamp(value.auth.lastRefreshStartedAt),
+      lastRefreshCompletedAt: localIncidentTimestamp(value.auth.lastRefreshCompletedAt),
+      lastCredentialExpiresAt: localIncidentTimestamp(value.auth.lastCredentialExpiresAt),
+    },
+  };
+}
+
+function extractTransportDiagnostics(lines: readonly IncidentLine[], runtime: TunnelIncidentRuntimeDiagnostics | null): IncidentTransportDiagnostics {
+  let webSocketCloseCode = runtime?.process.webSocketCloseCode ?? null;
+  let httpStatus = runtime?.process.httpStatus ?? null;
+  let networkError: IncidentTransportDiagnostics['networkError'] = runtime?.process.networkError === null || runtime?.process.networkError === undefined
+    ? null
+    : { ...runtime.process.networkError, timestamp: localIncidentTimestamp(runtime.process.lastExitAt) };
+  let lastDisconnectAt: string | null = null;
+  const sources = new Set<'process_stderr' | 'tunnel_log'>();
+  if (webSocketCloseCode !== null || httpStatus !== null || networkError !== null || runtime?.process.stderrTail !== null && runtime?.process.stderrTail !== undefined) sources.add('process_stderr');
+  for (const line of lines) {
+    if (line.source !== 'tunnel') continue;
+    const lifecycle = line.correlation?.kind === 'tunnel' ? line.correlation.lifecycle : undefined;
+    if (lifecycle === 'ttl_expired' || lifecycle === 'stdio_stopped' || lifecycle === 'transport_stopped') lastDisconnectAt = localIncidentTimestamp(line.timestamp);
+    const text = line.text.trim();
+    const wsMatch = text.match(/(?:websocket|web\s*socket|\bws\b|connection)[^\r\n]{0,96}?(?:close(?:d)?(?:\s+code)?|code)\D{0,8}(1\d{3}|[234]\d{3})/i)
+      ?? text.match(/(?:close(?:d)?\s+code)\D{0,8}(1\d{3}|[234]\d{3})/i);
+    const httpMatch = text.match(/(?:http(?:\/\d(?:\.\d)?)?(?:\s+status)?|status(?:\s+code)?)\D{0,12}([45]\d{2})/i);
+    const codeMatch = text.match(/\b(ECONNRESET|EPIPE|ETIMEDOUT|ESOCKETTIMEDOUT|ENOTFOUND|EAI_AGAIN|ECONNREFUSED|CERT_[A-Z0-9_]+|ERR_TLS_[A-Z0-9_]+|ERR_SSL_[A-Z0-9_]+)\b/i);
+    const haystack = text.toUpperCase();
+    let category: NonNullable<IncidentTransportDiagnostics['networkError']>['category'] | null = null;
+    if (/ECONNRESET|\bEPIPE\b|SOCKET[^\r\n]*CLOSED/.test(haystack)) category = 'connection_reset';
+    else if (/ETIMEDOUT|ESOCKETTIMEDOUT|\bTIMEOUT\b|TIMED OUT/.test(haystack)) category = 'timeout';
+    else if (/ENOTFOUND|EAI_AGAIN|\bDNS\b/.test(haystack)) category = 'dns';
+    else if (/CERT_|\bTLS\b|\bSSL\b|ERR_TLS|ERR_SSL/.test(haystack)) category = 'tls';
+    else if (/ECONNREFUSED/.test(haystack)) category = 'connection_refused';
+    else if (httpMatch !== null) category = 'http';
+    if (wsMatch?.[1] !== undefined) { webSocketCloseCode = Number.parseInt(wsMatch[1], 10); sources.add('tunnel_log'); }
+    if (httpMatch?.[1] !== undefined) { httpStatus = Number.parseInt(httpMatch[1], 10); sources.add('tunnel_log'); }
+    if (category !== null) {
+      networkError = {
+        code: codeMatch?.[1]?.toUpperCase() ?? (httpMatch?.[1] === undefined ? null : `HTTP_${httpMatch[1]}`),
+        category,
+        message: safe(text),
+        timestamp: localIncidentTimestamp(line.timestamp),
+      };
+      sources.add('tunnel_log');
+    }
+  }
+  return { webSocketCloseCode, httpStatus, networkError, lastDisconnectAt, evidenceSources: [...sources] };
+}
+
+export async function buildIncidentReport(evidence: IncidentEvidence): Promise<IncidentReport> {
+  const classification = classifyIncident(evidence);
+  const pids = trustedPids(evidence.relevantPids ?? []);
+  const unavailableReason = evidence.relevantPidUnavailableReason ?? 'no_trustworthy_tunnel_pid';
+  const processTree = await collectProcesses(evidence.collectProcessTree, pids, unavailableReason);
+  const listenerPids = trustedPids([...pids, ...processTree.entries.map((entry) => entry.pid)]);
+  const tcpListeners = await collectListeners(evidence.collectListeners, listenerPids, unavailableReason);
+  const correlations = parseTunnelCorrelations(evidence.logLines);
+  const runtimeDiagnostics = localizeRuntimeDiagnostics(evidence.runtimeDiagnostics);
+  const report: IncidentReport = {
+    schemaVersion: 3,
+    capturedAt: formatOffsetIsoTimestamp(new Date(), DEFAULT_DISPLAY_TIME_ZONE),
+    timeZone: DEFAULT_DISPLAY_TIME_ZONE,
+    appVersion: evidence.appVersion,
+    tunnelClientVersion: evidence.tunnelClientVersion,
+    tunnelClientVersionReason: evidence.tunnelClientVersionReason ?? null,
+    classification: classification.classification,
+    classificationReasons: classification.reasons,
+    updaterEventTail: normalizeUpdaterEvents(evidence.updaterEvents),
+    tunnel: { state: evidence.tunnel.state, source: evidence.tunnel.source, ...correlations, health: { state: evidence.tunnel.health.state, message: evidence.tunnel.health.message } },
+    runtimeDiagnostics,
+    transport: extractTransportDiagnostics(evidence.logLines, runtimeDiagnostics),
+    mcpCalls: pairMcpCalls(evidence.logLines).map(localizeIncidentCall),
+    desktopCrashEventTail: (evidence.crashEvents ?? []).slice(-64),
+    ...(evidence.desktopSession === undefined ? {} : { desktopSession: evidence.desktopSession }),
+    ...(evidence.crashDumps === undefined ? {} : { crashDumps: evidence.crashDumps }),
+    ...(evidence.desktopMemory === undefined ? {} : { desktopMemory: evidence.desktopMemory }),
+    ...(evidence.runtimeHistory === undefined ? {} : { runtimeHistory: evidence.runtimeHistory }),
+    tunnelLogTail: evidence.logLines.filter((line) => line.source === 'tunnel').slice(-MAX_ENTRIES).map((line) => {
+      const tunnelCorrelation = line.correlation?.kind === 'tunnel' ? line.correlation : undefined;
+      return {
+        timestamp: localIncidentTimestamp(line.timestamp) ?? safe(line.timestamp),
+        lifecycle: tunnelCorrelation?.lifecycle ?? 'other',
+        message: safe(line.text),
+        ...(tunnelCorrelation?.instanceId === undefined ? {} : { instanceId: tunnelCorrelation.instanceId }),
+        ...(tunnelCorrelation?.requestId === undefined ? {} : { requestId: tunnelCorrelation.requestId }),
+      };
+    }),
+    processTree,
+    tcpListeners,
+  };
+  return sanitizeStrings(report);
+}
+export interface IncidentExportOptions { readonly choosePath: () => Promise<string | null>; readonly writeAtomically: (filePath: string, content: string) => Promise<void>; }
+export async function exportIncidentReport(evidence: IncidentEvidence, options: IncidentExportOptions): Promise<{ readonly exported: boolean; readonly cancelled: boolean; readonly classification: IncidentClassification; readonly capturedAt: string | null }> { const report = await buildIncidentReport(evidence); const filePath = await options.choosePath(); if (filePath === null) return { exported: false, cancelled: true, classification: report.classification, capturedAt: null }; await options.writeAtomically(filePath, JSON.stringify(report, null, 2) + '\n'); return { exported: true, cancelled: false, classification: report.classification, capturedAt: report.capturedAt }; }
+export async function atomicWrite(filePath: string, content: string): Promise<void> { const temp = `${filePath}.${randomUUID()}.tmp`; try { await writeFile(temp, content, { encoding: 'utf8', flag: 'wx' }); await rename(temp, filePath); } catch (error) { await unlink(temp).catch(() => undefined); throw error; } }
+export async function collectRelevantProcessTree(pids: readonly number[], platform: NodeJS.Platform = process.platform): Promise<readonly IncidentProcess[]> {
+  const roots = trustedPids(pids);
+  if (roots.length === 0) return [];
+  // Query only non-sensitive identity/parent/name fields. Descendant expansion
+  // happens locally and remains anchored to the verified root PIDs.
+  if (platform !== 'win32') {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid=,comm='], { encoding: 'utf8', timeout: 3_000, maxBuffer: 512 * 1024 });
+    const rows: IncidentProcess[] = [];
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = /^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line);
+      if (match === null) continue;
+      const pid = Number(match[1]);
+      const parentPid = Number(match[2]);
+      if (!Number.isInteger(pid) || pid <= 0 || !Number.isInteger(parentPid) || parentPid < 0) continue;
+      rows.push({ pid, parentPid: parentPid > 0 ? parentPid : null, executable: safe(match[3] ?? 'unknown') });
+    }
+    return selectRelevantProcesses(rows, roots);
+  }
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', 'Get-CimInstance Win32_Process -ErrorAction Stop | Select-Object ProcessId,ParentProcessId,Name | ConvertTo-Json -Compress'], { windowsHide: true, timeout: 3_000, encoding: 'utf8' });
+  const rows = parseRows(stdout, null).map((row) => ({ pid: number(row.ProcessId), parentPid: nullableNumber(row.ParentProcessId), executable: safe(typeof row.Name === 'string' ? row.Name : 'unknown') }))
+    .filter((entry) => entry.pid > 0);
+  return selectRelevantProcesses(rows, roots);
+}
+export function selectRelevantProcesses(entries: readonly IncidentProcess[], rootPids: readonly number[]): readonly IncidentProcess[] {
+  const included = new Set(trustedPids(rootPids));
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const entry of entries) {
+      if (included.has(entry.pid) || entry.parentPid === null || !included.has(entry.parentPid)) continue;
+      included.add(entry.pid);
+      changed = true;
+    }
+  }
+  return entries.filter((entry) => included.has(entry.pid)).slice(0, MAX_ENTRIES);
+}
+export async function collectRelevantListeners(pids: readonly number[], platform: NodeJS.Platform = process.platform): Promise<readonly IncidentListener[]> {
+  const roots = trustedPids(pids);
+  if (roots.length === 0) return [];
+  if (platform === 'linux') {
+    const { stdout } = await execFileAsync('ss', ['-ltnpH'], {
+      encoding: 'utf8', timeout: 3_000, maxBuffer: 256 * 1024,
+    });
+    return parseLinuxSsListeners(stdout, roots);
+  }
+  if (platform === 'darwin') {
+    const { stdout } = await execFileAsync('lsof', ['-nP', '-a', '-p', roots.join(','), '-iTCP', '-sTCP:LISTEN'], {
+      encoding: 'utf8', timeout: 3_000, maxBuffer: 256 * 1024,
+    });
+    const listeners: IncidentListener[] = [];
+    for (const line of stdout.split(/\r?\n/).slice(1)) {
+      const columns = line.trim().split(/\s+/);
+      const pid = Number(columns[1]);
+      const match = /\s(.*):(\d+)(?:\s+\(LISTEN\))?\s*$/.exec(line.trim());
+      if (!Number.isInteger(pid) || pid <= 0 || match === null) continue;
+      const port = Number(match[2]);
+      if (!Number.isInteger(port) || port <= 0 || port > 65_535) continue;
+      listeners.push({ pid, address: safe(match[1] ?? 'unknown'), port });
+    }
+    return listeners.slice(0, MAX_ENTRIES);
+  }
+  if (platform !== 'win32') return [];
+  const clause = roots.map((pid) => `$_.OwningProcess -eq ${pid}`).join(' -or ');
+  const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `Get-NetTCPConnection -State Listen -ErrorAction Stop | Where-Object { ${clause} } | Select-Object OwningProcess,LocalAddress,LocalPort | ConvertTo-Json -Compress`], { windowsHide: true, timeout: 3_000, encoding: 'utf8' });
+  return parseRows(stdout).map((row) => ({ pid: number(row.OwningProcess), address: safe(typeof row.LocalAddress === 'string' ? row.LocalAddress : 'unknown'), port: number(row.LocalPort) }));
+}
+
+export function parseLinuxSsListeners(raw: string, rootPids: readonly number[]): readonly IncidentListener[] {
+  const roots = new Set(trustedPids(rootPids));
+  if (roots.size === 0) return [];
+  const listeners: IncidentListener[] = [];
+  const seen = new Set<string>();
+  for (const line of raw.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    const columns = trimmed.split(/\s+/);
+    const localEndpoint = columns[3];
+    if (localEndpoint === undefined) continue;
+    const endpoint = /^(.*):(\d+)$/.exec(localEndpoint);
+    if (endpoint === null) continue;
+    const port = Number(endpoint[2]);
+    if (!Number.isInteger(port) || port <= 0 || port > 65_535) continue;
+    const pids = [...trimmed.matchAll(/pid=(\d+)/g)].map((match) => Number(match[1])).filter((pid) => roots.has(pid));
+    for (const pid of pids) {
+      const address = (endpoint[1] ?? 'unknown').replace(/^\[(.*)\]$/u, '$1');
+      const key = `${pid}|${address}|${port}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      listeners.push({ pid, address: safe(address), port });
+      if (listeners.length >= MAX_ENTRIES) return listeners;
+    }
+  }
+  return listeners;
+}
+async function collectProcesses(collector: IncidentEvidence['collectProcessTree'], pids: readonly number[], noPidReason: string): Promise<IncidentReport['processTree']> {
+  if (pids.length === 0) return { available: false, entries: [], error: safe(noPidReason) };
+  if (collector === undefined) return { available: false, entries: [], error: 'collector_unavailable' };
+  try { return { available: true, entries: (await collector(pids)).slice(0, MAX_ENTRIES).map((entry) => ({ pid: entry.pid, parentPid: entry.parentPid, executable: safe(entry.executable) })) }; }
+  catch (error) { return { available: false, entries: [], error: safe(error instanceof Error ? error.message : String(error)) }; }
+}
+async function collectListeners(collector: IncidentEvidence['collectListeners'], pids: readonly number[], noPidReason: string): Promise<IncidentReport['tcpListeners']> {
+  if (pids.length === 0) return { available: false, entries: [], error: safe(noPidReason) };
+  if (collector === undefined) return { available: false, entries: [], error: 'collector_unavailable' };
+  try { return { available: true, entries: (await collector(pids)).slice(0, MAX_ENTRIES).map((entry) => ({ pid: entry.pid, address: safe(entry.address), port: entry.port })) }; }
+  catch (error) { return { available: false, entries: [], error: safe(error instanceof Error ? error.message : String(error)) }; }
+}
+
+function trustedPids(values: readonly number[]): number[] {
+  return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0 && pid <= 2_147_483_647))].slice(0, MAX_IDS);
+}
+
+function normalizeUpdaterEvents(events: readonly string[]): IncidentReport['updaterEventTail'] {
+  const normalized: Array<IncidentReport['updaterEventTail'][number]> = [];
+  for (const event of events.slice(-MAX_ENTRIES)) {
+    const match = /^(checking-for-update|update-available|update-not-available|update-downloaded|error)(?::([^\r\n]{1,128}))?$/.exec(event);
+    if (match === null) continue;
+    const category = match[1] as IncidentReport['updaterEventTail'][number]['category'];
+    const detail = match[2];
+    if (category !== 'error' && detail !== undefined && /^[0-9A-Za-z._+-]{1,64}$/.test(detail)) normalized.push({ category, version: detail });
+    else normalized.push({ category });
+  }
+  return normalized;
+}
+function safe(value: string): string {
+  return value
+    .replace(OAUTH_QUERY_SECRET_VALUE, '$1[REDACTED]')
+    .replace(AUTHORIZATION_VALUE, 'authorization=[REDACTED]')
+    .replace(CLI_SECRET_VALUE, (_match, prefix: string, flag: string) => `${prefix}${flag} [REDACTED]`)
+    .replace(PREFIXED_ENV_SECRET_VALUE, (_match, prefix: string, key: string, separator: string) => `${prefix}${key}${separator}[REDACTED]`)
+    .replace(JSON_SECRET_VALUE, '$1"[REDACTED]"')
+    .replace(ASSIGNED_SECRET_VALUE, (_match, prefix: string, key: string, separator: string) => `${prefix}${key}${separator}[REDACTED]`)
+    .replace(KNOWN_SECRET_PREFIX, '[REDACTED]')
+    .slice(0, MAX_TEXT);
+}
+
+function sanitizeStrings<T>(value: T): T {
+  if (typeof value === 'string') return safe(value) as T;
+  if (Array.isArray(value)) return value.map((entry) => sanitizeStrings(entry)) as T;
+  if (typeof value !== 'object' || value === null) return value;
+  return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, sanitizeStrings(entry)])) as T;
+}
+
+function completionResult(resultCode: IncidentCall['resultCode']): { readonly resultCode: Exclude<IncidentCall['resultCode'], null>; readonly completionState: Exclude<IncidentCompletionState, 'conflict'> } {
+  if (resultCode === 'SUCCESS') return { resultCode, completionState: 'success' };
+  if (resultCode === 'FAILED' || resultCode === 'FATAL') return { resultCode, completionState: 'failure' };
+  return { resultCode: 'UNKNOWN', completionState: 'unknown' };
+}
+
+function sourceSequence(line: IncidentLine, index: number): number {
+  return typeof line.id === 'number' && Number.isSafeInteger(line.id) && line.id >= 0 ? line.id : index + 1;
+}
+
+function mcpEvidenceIdentity(line: IncidentLine, correlation: Extract<NonNullable<IncidentLine['correlation']>, { readonly kind: 'mcp' }>): string {
+  const sourceId = typeof line.id === 'number' && Number.isSafeInteger(line.id) ? `id:${line.id}` : `event:${line.timestamp}:${line.text}`;
+  return `${sourceId}:${correlation.phase}:${correlation.callId}:${correlation.toolName}:${String(correlation.resultCode)}`;
+}
+function parseRows(raw: string, limit: number | null = MAX_ENTRIES): Record<string, unknown>[] { try { const parsed: unknown = JSON.parse(raw || '[]'); const rows = (Array.isArray(parsed) ? parsed : [parsed]).filter((value): value is Record<string, unknown> => typeof value === 'object' && value !== null); return limit === null ? rows : rows.slice(0, limit); } catch { return []; } }
+function number(value: unknown): number { return typeof value === 'number' && Number.isFinite(value) ? value : 0; }
+function nullableNumber(value: unknown): number | null { const parsed = number(value); return parsed > 0 ? parsed : null; }

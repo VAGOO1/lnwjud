@@ -1,0 +1,90 @@
+name: Dev Windows Installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v7
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: Install cosign for tunnel provenance verification
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: 'v3.1.3'
+
+      - name: Setup pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 10.15.0
+          run_install: false
+
+      - name: Install dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify scheduled continuation contract
+        shell: pwsh
+        run: |
+          pnpm --filter @lnwjud/mcp-server exec vitest run src/scheduled-continuation-skill-contract.test.ts src/tools/goal-tools.test.ts src/tools/scheduled-continuation-tools.test.ts
+          pnpm --filter @lnwjud/application exec vitest run src/scheduled-continuation-service.test.ts
+          pnpm --filter @lnwjud/storage exec vitest run src/scheduled-continuation.integration.test.ts
+
+      - name: Build workspace dependencies
+        shell: pwsh
+        run: pnpm build
+
+      - name: Build Windows Setup and Portable
+        shell: pwsh
+        env:
+          LNWJUD_COSIGN_PATH: cosign
+        run: powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File scripts/package-windows.ps1
+
+      - name: Run packaged Windows Electron MCP and security smoke
+        shell: pwsh
+        timeout-minutes: 10
+        env:
+          LNWJUD_PACKAGED_EXECUTABLE: ${{ github.workspace }}/apps/desktop/dist/installers/win-unpacked/lnwjud.exe
+          PLAYWRIGHT_HTML_OPEN: never
+        run: pnpm --filter @lnwjud/desktop exec playwright test --config playwright.config.ts desktop-dashboard.e2e.ts desktop-mcp-client.e2e.ts tools-doctor.e2e.ts electron-security.e2e.ts --trace=retain-on-failure --reporter=list,html
+
+      - name: Upload Windows packaged E2E diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-windows-e2e-${{ github.sha }}
+          path: |
+            apps/desktop/test-results/
+            apps/desktop/playwright-report/
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Upload dev installer artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: dev-windows-installer-${{ github.sha }}
+          path: |
+            apps/desktop/dist/installers/*.exe
+            apps/desktop/dist/installers/*.blockmap
+            apps/desktop/dist/installers/latest.yml
+            apps/desktop/dist/installers/portable.yml
+            apps/desktop/dist/installers/SHA256SUMS.txt
+            apps/desktop/dist/installers/PROVENANCE.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

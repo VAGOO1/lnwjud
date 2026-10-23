@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "revision": "fixture-r2",
+  "scope": "VAGOO_OWNED_INERT_FIXTURE_ONLY",
+  "sourceFilesSha256": {
+    "scripts/task-completion-evidence.mjs": "166ca1c3fa8aa3a8d6d7bec434aadf64946a51445d495eda95ce01796360de6e",
+    "scripts/windows-observation-adapter.mjs": "51ae6c3ca06351abef9d0e89efcfa16e8195b6e9019b9659509ad60f457d5b4c",
+    "scripts/windows-owned-process-reader.psm1": "a9de723df81f4ba80feedeafa6d07bdc04a7e43f618d55a18e0baa7ada054e0a",
+    "scripts/test-windows-owned-reader.ps1": "95b14d8b7a0339830974fba2543010d9607927fe037953af06e608060f67707e",
+    "scripts/native-inert-worker.mjs": "e941485df14dd732aedaa984fbfbdbefca775a45900b71b5fcc283b20d88c2a0",
+    "scripts/run-native-owned-check.mjs": "80d89fbd8ea103324297f6df59dcfd04922bfd3d78b400b8047c35cf07a8458c",
+    "scripts/run-native-owned-check.test.mjs": "9f5f8b03d28ff711c80c104ae4d0cb003f77d95cba3cfdfa777550aa324e6325",
+    "audit/negative-case-regressions.mjs": "25ab6a5ae9b7290ef9ad808aa9a18128628b6cbb3c2981fc2cd591cd548d1326"
+  },
+  "nativeAcceptance": {
+    "status": "TESTED_NATIVE_LOCAL_R2_OWNED_FIXTURE",
+    "machine": "VAGOO",
+    "dateThai": "2026-10-22",
+    "invocationId": "64076165-97e2-4e7a-84bb-9af92ccc0edd",
+    "attempts": 1,
+    "nativeEvidenceSha256": "0fbfed2419d61f493aca73b63a26d11cbdd24f927438edfb5f3679027b1a44be",
+    "resultSha256": "e7cc12383fa7a6a8d93fedafec340076b1c038dc4fd5b286afbc52001690ac80",
+    "appliesTo": "The exact R2 source hashes; original isolated fixture path only",
+    "rerunDuringIntegration": false
+  },
+  "sourceIntegration": {
+    "primaryBase": "44253e7272d08944f7e1c1b6a4602de76b20edac",
+    "originalDefaultTest": "corepack pnpm@10.15.0 -r --if-present test",
+    "nativeAtIntegratedPath": "NOT_RUN",
+    "productRuntimeIntegration": false
+  },
+  "recoveryAuthorization": "NONE",
+  "taskWideCompletion": "UNKNOWN"
+}

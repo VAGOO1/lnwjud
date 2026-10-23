@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="th"><head><meta charset="utf-8"><title>PANYA APPROVAL 3 STEP — จำลองเท่านั้น</title>
+<style>body{font:16px sans-serif;max-width:900px;margin:24px auto;padding:16px}label{display:block;margin:8px}input{padding:7px}button{padding:10px;margin:5px}#source-options,.product-option,#review,#receipt{display:none}#review.open,#receipt.open{display:block}pre{white-space:pre-wrap}.probe{display:none}</style></head>
+<body><h1>ทดสอบอนุมัติสามขั้น — ข้อมูลจำลอง ไม่เชื่อมร้าน</h1><p id="mode"></p><main id="app"></main>
+<input id="password-probe" type="password" value="FAKE-PASSWORD"><input id="hidden-probe" type="hidden" value="FAKE-HIDDEN-TOKEN">
+<input id="file-probe" type="file"><div id="many-nodes-probe"></div>
+<div id="attribute-probe" data-session-id="FAKE-SESSION" data-label="public"></div><select id="options-probe"></select>
+<div id="overflow-probe" class="probe"></div><button class="ambiguous-probe" onclick="probeClick()">PROBE</button><button class="ambiguous-probe" style="display:none" onclick="probeClick()">PROBE</button><output id="probe-clicks">0</output>
+<button id="throw-probe" onmousedown="throw new Error('FAKE handler failure')">THROW</button><button id="detach-probe" onmousedown="this.remove()">DETACH</button><button id="after-probe" onclick="probeClick()">AFTER</button>
+<section id="history-probes"></section><div id="long-attribute-probe"></div>
+<script>
+'use strict';
+const caseId = new URL(location.href).searchParams.get('case') || 'default';
+const storageKey = 'panya-approval-three-step-fixture-' + caseId;
+const bill = 'FAKE-3STEP-' + caseId;
+const products = [
+ {sku:'FF-05',code:'442',name:'ปลากินพืชกลาง 442',qty:5,cost:360,sell:375,stock:81},
+ {sku:'FF-04',code:'443',name:'ปลากินพืชใหญ่ 443',qty:10,cost:345,sell:365,stock:253},
+ {sku:'FF-01',code:'4643',name:'ปลาดุกใหญ่ 4643',qty:10,cost:450,sell:470,stock:304},
+ {sku:'FF-03',code:'4641',name:'ปลาดุกเล็ก 4641',qty:10,cost:480,sell:495,stock:115}
+];
+const initial = {commits:0,records:[],stocks:products.map(p=>p.stock),prices:products.map(p=>p.sell)};
+const saved = JSON.parse(localStorage.getItem(storageKey) || JSON.stringify(initial));
+const app = document.querySelector('#app');
+document.querySelector('#mode').textContent = 'เครื่องทดสอบ / ' + location.pathname + ' / ' + caseId;
+document.querySelector('#overflow-probe').textContent = 'X'.repeat(70000);
+document.querySelector('#long-attribute-probe').setAttribute('data-label','X'.repeat(300));
+for(let i=0;i<50;i++){const p=document.createElement('p');p.className='history-row';p.textContent=i===49?'LAST-ROW-BILL':'Row '+i;document.querySelector('#history-probes').append(p);}
+for(let i=0;i<1001;i++){const span=document.createElement('span');span.className='many-node';span.textContent='X';span.onclick=()=>span.setAttribute('data-label','clicked');document.querySelector('#many-nodes-probe').append(span);}
+for(let i=0;i<51;i++){const o=document.createElement('option');o.value=String(i);o.textContent='Option '+i;document.querySelector('#options-probe').append(o);}
+function probeClick(){document.querySelector('#probe-clicks').textContent=String(Number(document.querySelector('#probe-clicks').textContent)+1);}
+function node(tag,id,text,parent){const e=document.createElement(tag);if(id)e.id=id;if(text!==undefined)e.textContent=text;(parent||app).append(e);return e;}
+function input(id,label,value,type,parent){const l=node('label',null,label,parent);const e=node('input',id,undefined,l);e.className='invoice-field';e.type=type||'text';e.value=value||'';return e;}
+function history(){
+ node('h2','history-ready','ประวัติจำลอง');
+ node('output','commit-count',String(saved.commits));
+ if(saved.records.length){node('div','existing-bill',bill);const list=node('section','saved-lines');for(const r of saved.records)node('p',null,r.sku+' | '+r.qty+' | '+r.cost+' | '+r.amount,list);}
+ node('output','saved-total',String(saved.records.reduce((a,r)=>a+r.amount,0)));
+ node('output','saved-quantity',String(saved.records.reduce((a,r)=>a+r.qty,0)));
+ for(let i=0;i<4;i++){node('output','stock-'+i,String(saved.stocks[i]));node('output','price-'+i,String(saved.prices[i]));}
+}
+function invoice(){
+ const form=node('section','invoice-form');
+ input('billNumber','เลขบิล','',null,form);input('movementDate','วันที่','2026-10-19','date',form);
+ const search=input('sourceSearch','ผู้ขายจำลอง','',null,form);
+ const selected=node('output','selected-source','ยังไม่เลือก',form);
+ const sourceOptions=node('div','source-options','',form);const source=node('button','source-option','ผู้ขายจำลอง ID 13',sourceOptions);source.type='button';
+ search.addEventListener('input',()=>sourceOptions.style.display='block');
+ source.addEventListener('mousedown',e=>{e.preventDefault();selected.textContent='ผู้ขายจำลอง ID 13';search.value='ผู้ขายจำลอง';sourceOptions.remove();});
+ for(let i=0;i<4;i++){
+  const p=products[i],row=node('article','row-'+i,'',form);
+  const product=input('product-'+i,'สินค้า '+p.sku,'',null,row);const choice=node('button','product-option-'+i,p.name+' ('+p.sku+')',row);choice.className='product-option';choice.type='button';
+  product.addEventListener('input',()=>choice.style.display='inline-block');
+  choice.addEventListener('click',()=>{product.value=p.name+' ('+p.sku+')';node('output','selected-product-'+i,p.sku,row);choice.style.display='none';});
+  input('quantity-'+i,'กระสอบ','', 'number',row);input('cost-'+i,'ต้นทุน','', 'number',row);input('sell-'+i,'ราคาขายใหม่ (ว่าง=คงเดิม)','', 'number',row);
+ }
+ for(let i=0;i<31;i++)input('extra-'+i,'ข้อมูลจำลอง '+i,'',null,form);
+ const reviewButton=node('button','review-button','ตรวจทานบิลจำลอง',form);reviewButton.type='button';
+ const review=node('section','review','',form);review.setAttribute('role','dialog');
+ reviewButton.addEventListener('click',()=>{
+  const valid=document.querySelector('#billNumber').value===bill&&selected.textContent==='ผู้ขายจำลอง ID 13'&&products.every((p,i)=>document.querySelector('#product-'+i).value===p.name+' ('+p.sku+')'&&Number(document.querySelector('#quantity-'+i).value)===p.qty&&Number(document.querySelector('#cost-'+i).value)===p.cost&&document.querySelector('#sell-'+i).value==='');
+  if(!valid){node('p','validation-error','ข้อมูลไม่ตรง',form);return;}
+  review.replaceChildren();node('h2',null,'ตรวจทานก่อนบันทึกจำลอง',review);node('output','review-bill',bill,review);node('output','review-quantity','35',review);node('output','review-total','14550',review);
+  const commit=node('button','commit-button','ยืนยันบิลจำลอง',review);commit.type='button';review.className='open';
+  commit.addEventListener('click',()=>{
+   if(saved.commits!==0)throw new Error('Fixture forbids duplicate commit');
+   saved.commits=1;saved.records=products.map((p,i)=>({id:9001+i,sku:p.sku,qty:p.qty,cost:p.cost,amount:p.qty*p.cost}));saved.stocks=products.map(p=>p.stock+p.qty);localStorage.setItem(storageKey,JSON.stringify(saved));commit.disabled=true;
+   const receipt=node('section','receipt','',form);receipt.className='open';node('output','receipt-ready','บันทึกจำลองสำเร็จ',receipt);node('output','receipt-commits',String(saved.commits),receipt);node('output','receipt-total','14550',receipt);
+  });
+ });
+}
+if(location.pathname==='/history')history();else invoice();
+</script></body></html>

@@ -1,0 +1,11 @@
+packages:
+  - apps/*
+  - packages/*
+
+overrides:
+  "@electron/osx-sign>isbinaryfile": 5.0.7
+  js-yaml: 4.3.2
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild

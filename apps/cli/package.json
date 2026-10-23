@@ -1,0 +1,28 @@
+{
+  "name": "@lnwjud/cli",
+  "version": "5.8.7",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@lnwjud/application": "workspace:*",
+    "@lnwjud/audit": "workspace:*",
+    "@lnwjud/capabilities": "workspace:*",
+    "@lnwjud/codex": "workspace:*",
+    "@lnwjud/domain": "workspace:*",
+    "@lnwjud/extensions": "workspace:*",
+    "@lnwjud/mcp-server": "workspace:*",
+    "@lnwjud/permissions": "workspace:*",
+    "@lnwjud/shared": "workspace:*",
+    "@lnwjud/storage": "workspace:*",
+    "@lnwjud/workspace": "workspace:*"
+  },
+  "scripts": {
+    "test": "vitest run --fileParallelism=false",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --outDir dist"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@modelcontextprotocol/client": "2.0.0"
+  }
+}

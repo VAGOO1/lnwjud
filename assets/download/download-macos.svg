@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="96" viewBox="0 0 340 96" role="img" aria-labelledby="title desc">
+  <title id="title">Download lnwjud for macOS</title>
+  <desc id="desc">macOS Apple silicon DMG download card</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#151423"/><stop offset="1" stop-color="#0e1020"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#c084fc"/><stop offset="1" stop-color="#6366f1"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="338" height="94" rx="18" fill="url(#bg)" stroke="#3f3f5f" stroke-width="2"/>
+  <rect x="18" y="18" width="60" height="60" rx="16" fill="url(#accent)"/>
+  <path d="M34 57V39l14-8 14 8v18l-14 8-14-8zm14-19-8 5v10l8 5 8-5V43l-8-5z" fill="#fff" fill-rule="evenodd" opacity=".96"/>
+  <text x="96" y="42" fill="#f8fafc" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif" font-size="20" font-weight="700">macOS</text>
+  <text x="96" y="64" fill="#a5b4fc" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif" font-size="13">Apple silicon · DMG</text>
+  <circle cx="306" cy="48" r="18" fill="#1c1d35" stroke="#55567a"/>
+  <path d="M306 37v17m-7-6 7 7 7-7M298 62h16" fill="none" stroke="#eef2ff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

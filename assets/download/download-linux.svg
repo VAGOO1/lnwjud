@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="340" height="96" viewBox="0 0 340 96" role="img" aria-labelledby="title desc">
+  <title id="title">Download lnwjud for Linux</title>
+  <desc id="desc">Linux x64 DEB download card</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#17170f"/><stop offset="1" stop-color="#10120d"/></linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fbbf24"/><stop offset="1" stop-color="#f97316"/></linearGradient>
+  </defs>
+  <rect x="1" y="1" width="338" height="94" rx="18" fill="url(#bg)" stroke="#4b4a32" stroke-width="2"/>
+  <rect x="18" y="18" width="60" height="60" rx="16" fill="url(#accent)"/>
+  <path d="M35 39h26v20H35z" fill="none" stroke="#fff" stroke-width="2.4" rx="3"/>
+  <path d="m40 45 5 4-5 4m9 0h7" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="96" y="42" fill="#f8fafc" font-family="Segoe UI,Arial,sans-serif" font-size="20" font-weight="700">Linux</text>
+  <text x="96" y="64" fill="#fbbf24" font-family="Segoe UI,Arial,sans-serif" font-size="13">x64 · DEB package</text>
+  <circle cx="306" cy="48" r="18" fill="#252416" stroke="#5c5935"/>
+  <path d="M306 37v17m-7-6 7 7 7-7M298 62h16" fill="none" stroke="#fef3c7" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

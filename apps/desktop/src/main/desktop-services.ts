@@ -1,0 +1,3609 @@
+import { spawn } from 'node:child_process';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createServer } from 'node:net';
+import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { open, readFile } from 'node:fs/promises';
+import path from 'node:path';
+import os from 'node:os';
+import { sampleOwnedProcessMetrics } from './resource-process-metrics.js';
+import { hasInspectableGoalResults } from './doctor-goal-evidence.js';
+import runtimeDependencies from './runtime-dependencies.json' with { type: 'json' };
+import {
+  AgentSwarmService,
+  AutomationService,
+  AutomationVerifier,
+  CheckpointService,
+  CodexService,
+  CodexRulesService,
+  FileService,
+  EngineeringPreparationService,
+  GitService,
+  RepositoryImportService,
+  GoalContinuationService,
+  WorkflowTemplateService,
+  WorkflowStartService,
+  CallHistoryService,
+  TaskResultService,
+  ResourceSnapshotService,
+  GoalRequestCancellationService,
+  GoalTaskCancellationService,
+  GoalMutationFenceService,
+  ScheduledContinuationService,
+  ProjectService,
+  ProjectSnapshotService,
+  ProcessService,
+  SearchService,
+  JsonWorkspaceIndexStore,
+  WorkspaceIndexService,
+  WorkspaceInfoService,
+  WorkspaceQueryService,
+  ToolAvailabilityService,
+  type FileActor,
+  type DoctorProbeResult,
+} from '@lnwjud/application';
+import { SharedManagedWriterAdmission, SqliteWorkspaceWriterLease, SecureRepositoryImportRuntime, type BrowserCdpBackend } from '@lnwjud/capabilities';
+import { AuditService, decodeActivityTargetReference, type ActivityAuditEvent, type ActivityTargetDetail, type AuditEventRepository, type AuditEventSummaryProjection } from '@lnwjud/audit';
+import { CodexDiscovery, formatCodexDiscoveryError } from '@lnwjud/codex';
+import type { GoalRecord, Result } from '@lnwjud/domain';
+import { createChromeWorkMcp } from './chrome-work-mcp.js';
+import {
+  EXTENSIONS_SETTINGS_KEY,
+  createLocalExtensionsService,
+  parseExtensionsSettings,
+  type ExtensionsService,
+  type ExtensionsSettings,
+} from '@lnwjud/extensions';
+import {
+  ActivityTracker,
+  ContextEconomyRuntime,
+  DapSessionService,
+  OfficeDataWorkflowService,
+  LNWJUD_MCP_IDENTITY_PATH,
+  RuntimeEngineeringEvidenceVerifier,
+  createEngineeringArtifactVerifier,
+  createEngineeringSourceStateProvider,
+  RuntimeGoalManagedTaskStateReader,
+  createFileActivitySink,
+  mcpActivityLogPath,
+  type ActivitySinkEvent,
+  type EccRuntimeOptions,
+  type HostMutationApprovalRequest,
+  type HostMutationApprovalContext,
+  type McpApplicationServices,
+  type McpHttpServerOptions,
+  HOST_MUTATION_APPROVAL_TIMEOUT_MS,
+  type WorkspaceScope,
+} from '@lnwjud/mcp-server';
+import { permissionProfiles, type PermissionProfile, type PermissionProfileName } from '@lnwjud/permissions';
+import type { ManagedProcess } from '@lnwjud/process';
+import { PathExecutableResolver } from '@lnwjud/search';
+import {
+  ALLOW_AI_DELETE_SETTING_KEY,
+  DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY,
+  APP_NAME,
+  APP_VERSION,
+  DEFAULT_MCP_CALL_TIMEOUT_MS,
+  DEFAULT_MCP_IDLE_TIMEOUT_MS,
+  DEFAULT_PROCESS_TIMEOUT_MS,
+  DEFAULT_MCP_POLL_WAIT_SECONDS,
+  DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS,
+  MIN_CONFIGURABLE_WAIT_SECONDS,
+  MAX_CONFIGURABLE_WAIT_SECONDS,
+  DEFAULT_CODEX_TOOLS_ENABLED,
+  DEFAULT_ECC_ENABLED,
+  DEFAULT_PONYTAIL_MODE,
+  DEFAULT_TUNNEL_MAX_AUTO_RESTARTS,
+  DEFAULT_RECOVERY_RETENTION_DAYS,
+  DEFAULT_UPDATE_INTERVAL_MINUTES,
+  STDIO_ALLOWED_ROOTS_SETTING_KEY,
+  STDIO_PERMISSION_PROFILE_SETTING_KEY,
+  STDIO_STRICT_ROOTS_SETTING_KEY,
+  UNRESTRICTED_SETTING_KEY,
+  USER_SETTING_KEYS,
+  isUnrestricted,
+  parseCloseBehavior,
+  parseCustomPermissionSettings,
+  parseIntegerSetting,
+  parseMcpAllowedHostnames,
+  parsePathList,
+  parsePonytailMode,
+  normalizeProjectProfile,
+  resolvePonytailPolicy,
+  workspacePonytailMode,
+  parseStringRecordSetting,
+  parseAllowedRoots,
+  parseBooleanSetting,
+  parseDestructiveAutoApprovalPolicy,
+  parseEngineeringHarnessSettings,
+  parseEngineeringHarnessWorkspaceOverrides,
+  parseStdioPermissionProfile,
+  serializeAllowedRoots,
+  serializeCustomPermissionSettings,
+  serializeDestructiveAutoApprovalPolicy,
+  serializeEngineeringHarnessSettings,
+  serializeEngineeringHarnessWorkspaceOverrides,
+  serializeMcpAllowedHostnames,
+  serializePathList,
+  serializeStringRecordSetting,
+  currentPlatformProfile,
+  formatDisplayDateTime,
+  formatDisplayTimestampItem,
+  type SecretProtector,
+  type DestructiveAutoApprovalPolicy,
+  type EngineeringHarnessSettings,
+  type EngineeringHarnessWorkspaceOverride,
+} from '@lnwjud/shared';
+import { AesGcmCheckpointCipher, BACKUP_RESTORE_NOTICE_SETTING_KEY, parseBackupRestoreNotice, SqliteAgentSwarmRepository, SqliteAuditRepository, SqliteAutomationRepository, SqliteBackupService, SqliteCheckpointRepository, SqliteDatabase, SqliteSettingsRepository, SqliteWorkspaceRepository, type BackupReason, type BackupRestoreNotice as StorageBackupRestoreNotice, type BackupSummary, type CheckpointPayloadCipher } from '@lnwjud/storage';
+import { SqliteGoalRepository } from '@lnwjud/storage';
+import type { Workspace } from '@lnwjud/workspace';
+import { comparableHostPath, isDriveRoot, isMachineRootPath, resolveHostPath, SecretPolicy, WorkspacePathGuard, WorkspaceService } from '@lnwjud/workspace';
+import {
+  type AddWorkspaceRequest,
+  type BackupRestoreNotice as IpcBackupRestoreNotice,
+  type BackupSummary as IpcBackupSummary,
+  type AgentState,
+  type AuditEventSummary,
+  type ClearLogBufferRequest,
+  type ClearWorkLogRequest,
+  type ActivityTargetSearchCandidate,
+  type ConfigureTunnelProfileRequest,
+  type DeleteWorkspaceRequest,
+  type ConnectionModes,
+  type DashboardSnapshot,
+  type DashboardEngineeringHarnessStatus,
+  type DoctorCheck,
+  type DoctorReport,
+  type ToolCatalogSnapshot,
+  type WorkflowPrepareRequest,
+  type WorkflowTemplate,
+  type WorkflowDraft,
+  type CallHistoryRequest,
+  type CallHistoryPage,
+  type DoctorGoalOption,
+  type TaskResultSummary,
+  type RestoreTaskCheckpointRequest,
+  type RestoreTaskCheckpointResult,
+  type CancelOwnedGoalTaskRequest,
+  type CancelOwnedGoalTaskResult,
+  type ResourceSnapshotRequest,
+  type ResourceSnapshot,
+  type GetToolCatalogRequest,
+  type GetGitDiffRequest,
+  type GetGitDiffResponse,
+  type GitImagePreview,
+  type RecheckToolCatalogRequest,
+  type SetToolAvailabilityRequest,
+  type ResetToolAvailabilityRequest,
+  type SetToolAvailabilityResult,
+  type ToolCatalogItem,
+  type ToolProfileDecision,
+  type InFlightWorkItem,
+  type InstallOperationPhase,
+  type LoadLogSessionHistoryRequest,
+  type LoadLogSessionHistoryResult,
+  type LogSnapshot,
+  type ManagedBrowserStatus,
+  type PdfProviderInstallResult,
+  type McpConnectionStatus,
+  type PermissionProfileName as IpcPermissionProfileName,
+  type PonytailPolicyContext,
+  type SetGoalPonytailModeRequest,
+  type SetWorkspacePonytailModeRequest,
+  type ProcessSummary,
+  type PurgeRecoveryDataRequest,
+  type RemoteMcpStatus,
+  type RestoreCheckpointRequest,
+  type RestoreRecoveryItemRequest,
+  type SaveTunnelApiKeyRequest,
+  type ScheduleRestoreBackupRequest,
+  type SelectWorkspaceRequest,
+  type SetWorkspaceArchivedRequest,
+  type SetAiDeletePolicyRequest,
+  type SetLocaleRequest,
+  type SetPermissionProfileRequest,
+  type SetStdioPolicyRequest,
+  type SetTunnelClientPathRequest,
+  type SetUnrestrictedModeRequest,
+  type SetUserSettingsRequest,
+  type StartMcpRequest,
+  type StartProcessRequest,
+  type StopProcessRequest,
+  type TunnelAuthMode,
+  type TunnelOAuthLoginStatus,
+  type TunnelStatus,
+  type UserSettings,
+  type UiLocale,
+  type WorkLogEntry,
+  type WorkspaceSummary,
+} from '@lnwjud/ipc-contracts';
+import type { DesktopIpcServices } from './main.js';
+import { buildCapabilitySummary, createLocalCapabilityRuntime } from './capability-runtime.js';
+import { AsyncTtlCache } from './async-ttl-cache.js';
+import { inspectGitWorkingFile } from './git-file-inspection.js';
+import { ActivitySessionCatalog } from './activity-session-catalog.js';
+import type { ElectronNativeCapabilityApi } from './electron-native-capability-backend.js';
+import { RequirementRegistry, type RequirementDefinition, type RequirementProbeResult } from './tool-catalog/requirement-registry.js';
+import { RemediationRegistry } from './tool-catalog/remediation-registry.js';
+import { ToolCatalogService, type ToolCatalogServiceOptions } from './tool-catalog/tool-catalog-service.js';
+import { projectExternalMcpTools } from './tool-catalog/external-tool-catalog-adapter.js';
+import { LogHub, classifyMcpLogLevel, classifyMcpWorkLogKind } from './log-hub.js';
+import { buildIncidentReport, collectRelevantListeners, collectRelevantProcessTree, type IncidentDesktopMemory, type IncidentReport } from './incident-report.js';
+import { readCrashEventHistory } from './crash-recovery.js';
+import { readDesktopSessionSnapshot } from './desktop-session-diagnostics.js';
+import { readNativeCrashDumpMetadata } from './native-crash-diagnostics.js';
+import { readRuntimeDiagnosticsHistory } from './runtime-diagnostics-history.js';
+import { createRetryableShutdown } from './desktop-shutdown.js';
+import { DesktopMcpLifecycle } from './mcp-lifecycle.js';
+import { DesktopApprovalWork, type DesktopApprovalPrompt } from './desktop-approval-work.js';
+import { prepareChromeWorkLaunch, readChromeWorkLaunch, type ChromeWorkLaunch } from './chrome-work-launch.js';
+import type { ApprovalHostPlan } from './approval-host-runtime.js';
+import { WorkLogViewState } from './work-log-view-state.js';
+import { installPdfProvider, type InstalledPdfProvider } from './pdf-provider-installer.js';
+import { RemoteMcpController } from './remote-mcp-controller.js';
+import { supportedHostPlatform } from './platform-compatibility.js';
+import { CLIENT_PATH_SETTING, TunnelController } from './tunnel-controller.js';
+import { legacyTunnelSecretPath, oauthTunnelSessionPath, LegacyApiKeyCredentialProvider } from './tunnel-auth.js';
+import { TunnelAuthCoordinator } from './tunnel-auth-coordinator.js';
+import { OAuthTunnelAuthProvider, type TunnelOAuthProvisioningBackend } from './tunnel-oauth-provider.js';
+import { TunnelOAuthLoginManager } from './tunnel-oauth-login-manager.js';
+import { TunnelOAuthSessionStore } from './tunnel-oauth-store.js';
+import { startWatcherServer, type WatcherActivityEvent, type WatcherServerHandle, type WatcherSnapshot, type WatcherStatus } from './watcher-server.js';
+import { watcherGoalFromRecord, watcherPluginsFromServers } from './watcher-projection.js';
+
+const actor: FileActor = { clientId: 'desktop-renderer', clientName: `${APP_NAME} desktop` };
+const mcpActor: FileActor = { clientId: 'desktop-mcp-http', clientName: `${APP_NAME} desktop MCP` };
+const BUNDLED_TUNNEL_CLIENT_VERSION = runtimeDependencies.tunnelClient.version;
+const MAX_GIT_DIFF_FALLBACK_BYTES = 2 * 1024 * 1024;
+const MAX_GIT_IMAGE_PREVIEW_BYTES = 4 * 1024 * 1024;
+const permissionSettingKey = 'permission_profile';
+const selectedWorkspaceSettingKey = 'selected_workspace_id';
+const activeWorkspaceIdsSettingKey = 'active_workspace_ids';
+const workLogClearedSettingKey = 'work_log_cleared_at';
+const localeSettingKey = 'ui_locale';
+const tunnelIdentitySettingKey = 'tunnel_identity_id';
+const tunnelAuthModeSettingKey = 'tunnel_auth_mode';
+const tunnelRuntimeDesiredStateSettingKey = 'tunnel_runtime_desired_state';
+const tunnelRuntimeOwnerPathSettingKey = 'tunnel_runtime_owner_path';
+const watcherAccessTokenSettingKey = 'watcher_access_token_v1';
+const watcherInstanceIdSettingKey = 'watcher_instance_id_v1';
+const DEFAULT_WATCHER_PORT = 17890;
+const DEFAULT_WATCHER_PAIRING_PORT = 17891;
+
+export interface DesktopRuntime {
+  /** Main-process launch owner only. No renderer/MCP plan or connection registration endpoint exists. */
+  readonly chromeWork: {
+    prepare(input: Omit<ApprovalHostPlan, 'primaryWorkId'>): ChromeWorkLaunch;
+    register(ticket: ChromeWorkLaunch): ReturnType<DesktopApprovalWork['registerChromeWork']>;
+    reconnect(ticket: ChromeWorkLaunch, expectedRevision: number, sessionId: string): ReturnType<DesktopApprovalWork['reconnectChromeWork']>;
+  } | null;
+  /** Trusted host lifecycle API; intentionally absent from renderer IPC and MCP schemas. */
+  readonly approvalWork: DesktopApprovalWork | null;
+  readonly hostMutationApprovalProvider?: (request: HostMutationApprovalRequest, context: HostMutationApprovalContext) => boolean | Promise<boolean>;
+  readonly services: DesktopIpcServices;
+  readonly mcpServices: McpApplicationServices;
+  readonly mcpActor: FileActor;
+  readonly activityTracker: ActivityTracker;
+  readonly logHub: LogHub;
+  readonly toolAvailabilityService: ToolAvailabilityService;
+  getLocale(): UiLocale;
+  getUserSettings(): UserSettings;
+  getDestructivePolicy(): DestructiveAutoApprovalPolicy;
+  getActiveWorkspaceScope(): Promise<WorkspaceScope | null>;
+  getActiveWorkspaceScopes(): Promise<readonly WorkspaceScope[]>;
+  createBackup(reason?: BackupReason): Promise<BackupSummary>;
+  ensureDefaultWorkspace(rootPath: string): Promise<string>;
+  autoStartMcp(): Promise<McpConnectionStatus>;
+  autoStartWatcher(): Promise<string | null>;
+  autoStartTunnel(): Promise<TunnelStatus | null>;
+  autoStartRemoteMcp(): Promise<RemoteMcpStatus>;
+  prepareFactoryReset(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export interface DesktopRuntimeOptions {
+  readonly permissionProfile?: PermissionProfileName;
+  readonly hostMutationApprovalProvider?: DesktopApprovalPrompt;
+  readonly pdfProviderInstaller?: (dataPath: string) => Promise<InstalledPdfProvider>;
+  readonly onInstallActivity?: (kind: 'ngrok' | 'pdf_provider', update: { readonly phase: InstallOperationPhase; readonly progressPercent: number | null; readonly message: string | null } | null) => void;
+  readonly checkpointEncryptionKey?: Buffer;
+  readonly checkpointCipher?: CheckpointPayloadCipher;
+  readonly decryptTunnelSecret?: (cipherText: string) => Promise<string>;
+  /** Enables bounded SQLite polling for long-lived stdio processes that receive writes from another process. */
+  readonly watchToolAvailability?: boolean;
+  /** Injectable only when an officially supported Tunnel OAuth provisioning contract exists. */
+  readonly tunnelOAuthBackend?: TunnelOAuthProvisioningBackend;
+  /** Provider used for tunnel credentials and future secret-backed services. */
+  readonly secretProtector?: SecretProtector;
+  /** Electron main-process surface for cross-platform native UI capabilities. */
+  readonly nativeCapabilityApi?: ElectronNativeCapabilityApi;
+  /** Pinned ECC resources resolved by the Electron composition root. */
+  readonly eccRuntimeOptions?: EccRuntimeOptions;
+  /** Main-process memory evidence for incident reports; supplied only by Electron composition. */
+  readonly collectIncidentMemory?: () => IncidentDesktopMemory;
+  /** Flush the latest bounded runtime diagnostics sample immediately before an incident export. */
+  readonly captureRuntimeDiagnostics?: () => void;
+  /** Stable presentation-only session for one Desktop application launch. MCP ownership keeps its transport session separately. */
+  readonly logSessionId?: string;
+  /** Previous Desktop launch start used only for one-time migration of the old automatic startup-clear cursor. */
+  readonly previousLogSessionStartedAt?: string;
+}
+
+export function toolAvailabilityHostSyncDisposition(
+  locale: UiLocale,
+  exposureChanged: boolean,
+  remoteMcp: Pick<RemoteMcpStatus, 'state' | 'publicMcpUrl' | 'oauthConnected'> | null,
+): Pick<SetToolAvailabilityResult, 'chatgptActionRefreshMayBeRequired' | 'hostSyncMessage'> {
+  const trustedRemoteActive = remoteMcp?.state === 'running'
+    && remoteMcp.publicMcpUrl !== null
+    && remoteMcp.oauthConnected;
+  if (!exposureChanged || !trustedRemoteActive) {
+    return { chatgptActionRefreshMayBeRequired: false, hostSyncMessage: null };
+  }
+  return {
+    chatgptActionRefreshMayBeRequired: true,
+    hostSyncMessage: locale === 'th'
+      ? 'lnwjud อัปเดตรายการ MCP แบบ live แล้ว แต่ ChatGPT App ที่อนุมัติ action snapshot ไว้อาจยังใช้รายการเดิม การกด F5 ในเบราว์เซอร์ไม่รับประกันว่าจะรีเฟรช snapshot นี้ ให้ใช้ Action Refresh / Scan Tools ใน ChatGPT; ถ้า deployment ไม่มีคำสั่งดังกล่าว ให้ recreate + republish app ตาม workflow ของผู้ดูแล'
+      : 'lnwjud updated the live MCP tool list, but an approved ChatGPT App action snapshot may still use the previous list. Browser F5 is not guaranteed to refresh that snapshot. Use ChatGPT Action Refresh / Scan Tools; if that workflow is unavailable for this deployment, recreate + republish the app through the administrator workflow.',
+  };
+}
+
+interface StartupTunnelController {
+  status(): Promise<TunnelStatus>;
+  startAutomatically(): Promise<TunnelStatus>;
+  reconcileStoppedRuntime(): Promise<TunnelStatus | null>;
+}
+
+/**
+ * Profile configuration distinguishes a true first setup from a legacy profile
+ * that predates persisted desired-state intent. Fresh setup stays stopped until
+ * explicit Start; an existing profile preserves the historical running default.
+ */
+export interface ConfiguredTunnelRuntimePolicy {
+  readonly desiredState: 'running' | 'stopped';
+  readonly autoStart: boolean;
+}
+
+export function configuredTunnelRuntimePolicy(
+  autoReconnect: boolean,
+  desiredState: 'running' | 'stopped' | null,
+  hadExistingProfile: boolean,
+): ConfiguredTunnelRuntimePolicy {
+  const resolvedDesiredState = desiredState ?? (hadExistingProfile ? 'running' : 'stopped');
+  return {
+    desiredState: resolvedDesiredState,
+    autoStart: autoReconnect && resolvedDesiredState === 'running',
+  };
+}
+
+export async function applyConfiguredTunnelRuntimePolicy(
+  tunnelController: StartupTunnelController,
+  policy: ConfiguredTunnelRuntimePolicy,
+): Promise<void> {
+  if (policy.desiredState === 'stopped') {
+    await tunnelController.reconcileStoppedRuntime();
+    return;
+  }
+  if (policy.autoStart) await tunnelController.startAutomatically();
+}
+
+export async function autoStartPersistentTunnel(
+  tunnelController: StartupTunnelController,
+  autoReconnect: boolean,
+): Promise<TunnelStatus> {
+  const stopped = await tunnelController.reconcileStoppedRuntime();
+  if (stopped !== null) return stopped;
+  const status = await tunnelController.status();
+  const runtimeCredentialAvailable = status.runtimeCredentialAvailable ?? status.authReady ?? status.hasApiKey;
+  if (!autoReconnect || !status.profileExists || !runtimeCredentialAvailable || status.clientPath === null) return status;
+  try {
+    return await tunnelController.startAutomatically();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      ...status,
+      state: 'error',
+      message: `Tunnel automatic start failed: ${message}`,
+    };
+  }
+}
+
+
+function readWatcherPort(value: string | undefined, fallback: number, label: string): number {
+  if (value === undefined || value.trim().length === 0) return fallback;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${label} must be an integer from 1 to 65535`);
+  return port;
+}
+
+function watcherPlatform(platform: NodeJS.Platform): 'windows' | 'macos' | 'linux' | 'unknown' {
+  if (platform === 'win32') return 'windows';
+  if (platform === 'darwin') return 'macos';
+  if (platform === 'linux') return 'linux';
+  return 'unknown';
+}
+
+function watcherActivityFromSink(event: ActivitySinkEvent): WatcherActivityEvent {
+  const isReadLike = /^(read|find|search|list|workspace_|project_snapshot|inspect)/.test(event.toolName);
+  const failed = /(error|fail|denied|cancel|timeout)/i.test(event.resultCode);
+  const status: WatcherStatus = event.phase === 'started'
+    ? isReadLike ? 'analyzing' : 'running'
+    : failed ? 'error' : 'done';
+  const actorName = /^(codex|delegate_|agent_swarm_)/.test(event.toolName) ? 'Codex' : '@lnwjud';
+  const toolLabel = event.toolName.replaceAll('_', ' ');
+  return {
+    id: `${event.callId}:${event.phase}`,
+    timestamp: event.timestamp,
+    kind: event.toolName,
+    status,
+    actor: actorName,
+    summary: event.phase === 'started' ? `Running ${toolLabel}` : `Finished ${toolLabel}`,
+    ...(event.targetSummary === undefined ? {} : { detail: event.targetSummary }),
+    ...(event.workspaceId === undefined ? {} : { workspaceId: event.workspaceId }),
+  };
+}
+
+export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOptions = {}): DesktopRuntime {
+  if (options.secretProtector !== undefined && options.checkpointEncryptionKey === undefined && options.checkpointCipher === undefined) {
+    throw new Error('Desktop runtime requires a resolved checkpoint encryption key or fail-closed checkpoint cipher before startup');
+  }
+  const databaseFilename = path.join(dataPath, 'lnwjud.sqlite');
+  const backupDirectory = path.join(dataPath, 'backups');
+  const database = new SqliteDatabase(databaseFilename, {
+    backupDirectory,
+    platform: process.platform,
+    arch: process.arch,
+    onCanonicalFileReplaced: (filename): void => { console.warn(`[storage] Reopened replaced canonical SQLite database: ${filename}`); },
+  });
+  const workspaceRepository = new SqliteWorkspaceRepository(database);
+  const goalRepository = new SqliteGoalRepository(database);
+  const automationRepository = new SqliteAutomationRepository(database);
+  const workspaceIndex = new WorkspaceIndexService(workspaceRepository, new JsonWorkspaceIndexStore(path.join(dataPath, 'workspace-index')));
+  const settingsRepository = new SqliteSettingsRepository(database);
+  let watcherAccessToken = '';
+  let watcherAccessTokenOperation: Promise<string> | null = null;
+  const resolveWatcherAccessToken = (): Promise<string> => {
+    if (watcherAccessToken.length >= 32) return Promise.resolve(watcherAccessToken);
+    if (watcherAccessTokenOperation !== null) return watcherAccessTokenOperation;
+
+    watcherAccessTokenOperation = (async (): Promise<string> => {
+      const stored = settingsRepository.get(watcherAccessTokenSettingKey)?.trim() ?? '';
+      if (options.secretProtector === undefined) {
+        watcherAccessToken = stored.length >= 32 && !stored.startsWith('safe:v1:')
+          ? stored
+          : randomBytes(32).toString('base64url');
+        return watcherAccessToken;
+      }
+
+      if (stored.startsWith('safe:v1:')) {
+        const decrypted = await options.secretProtector.decrypt('watcher_access_token', stored);
+        if (decrypted.plainText.length < 32) throw new Error('Stored Watcher access token is invalid');
+        watcherAccessToken = decrypted.plainText;
+        if (decrypted.shouldReEncrypt) {
+          settingsRepository.set(watcherAccessTokenSettingKey, await options.secretProtector.encrypt('watcher_access_token', watcherAccessToken));
+        }
+        return watcherAccessToken;
+      }
+
+      watcherAccessToken = stored.length >= 32 ? stored : randomBytes(32).toString('base64url');
+      settingsRepository.set(watcherAccessTokenSettingKey, await options.secretProtector.encrypt('watcher_access_token', watcherAccessToken));
+      return watcherAccessToken;
+    })().finally(() => { watcherAccessTokenOperation = null; });
+    return watcherAccessTokenOperation;
+  };
+
+  let watcherInstanceId = settingsRepository.get(watcherInstanceIdSettingKey)?.trim() ?? '';
+  if (watcherInstanceId.length === 0) {
+    watcherInstanceId = randomUUID();
+    settingsRepository.set(watcherInstanceIdSettingKey, watcherInstanceId);
+  }
+  migrateLegacyMcpHttpPort(settingsRepository, process.env);
+  const toolAvailabilityService = new ToolAvailabilityService(settingsRepository);
+  const stopToolAvailabilityWatch = options.watchToolAvailability === true
+    ? toolAvailabilityService.watch(250, () => readUserSettings(settingsRepository, process.env).codexToolsEnabled)
+    : (): void => {};
+  const workLogViewState = new WorkLogViewState(settingsRepository);
+  if (options.previousLogSessionStartedAt !== undefined) workLogViewState.migrateAutomaticStartupClear(options.previousLogSessionStartedAt);
+  const auditRepository = new SqliteAuditRepository(database);
+  const activitySessionCatalog = new ActivitySessionCatalog(auditRepository, workLogViewState);
+  const auditService = new AuditService(auditRepository);
+  const checkpointEncryptionKey = options.checkpointEncryptionKey ?? (options.checkpointCipher === undefined ? resolveTestCheckpointEncryptionKey() : undefined);
+  const checkpointCipher = options.checkpointCipher ?? (checkpointEncryptionKey === undefined ? undefined : new AesGcmCheckpointCipher(checkpointEncryptionKey));
+  if (checkpointCipher === undefined) {
+    throw new Error('Desktop runtime requires a checkpoint encryption key resolved by the Electron composition root');
+  }
+  const checkpointRepository = new SqliteCheckpointRepository(database, checkpointCipher);
+  const backupService = new SqliteBackupService(database, { backupDirectory, databaseFilename, platform: process.platform, arch: process.arch });
+  const startupBackup = backupService.ensureRecent().catch((error: unknown) => {
+    console.error(`Automatic database backup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+  });
+  const workspaceService = new WorkspaceService(workspaceRepository);
+  const writerAdmission = new SharedManagedWriterAdmission(path.join(dataPath, 'background-tasks'));
+  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git') });
+  const codexDiscovery = new CodexDiscovery();
+  const executableResolver = new PathExecutableResolver();
+  const storedProfile = settingsRepository.get(permissionSettingKey);
+  let profileName: PermissionProfileName = options.permissionProfile ?? readPermissionProfile(storedProfile);
+  if (options.permissionProfile === undefined && storedProfile === null) settingsRepository.set(permissionSettingKey, profileName);
+  const readSettings = (): UserSettings => readUserSettings(settingsRepository, process.env);
+  const activePermissionProfile = (): PermissionProfile => profileName === 'custom'
+    ? customPermissionProfile(settingsRepository)
+    : permissionProfiles[profileName];
+  const desktopFullBypassEnabled = (): boolean => profileName === 'full' && readSettings().desktopFullBypassAll;
+  const unrestricted = isUnrestricted(process.env, settingsRepository.get(UNRESTRICTED_SETTING_KEY));
+  const destructivePolicyProvider = (): DestructiveAutoApprovalPolicy => parseDestructiveAutoApprovalPolicy(
+    settingsRepository.get(DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY),
+    parseBooleanSetting(settingsRepository.get(ALLOW_AI_DELETE_SETTING_KEY), false),
+  );
+  const allowAiDeleteProvider = (): boolean => destructivePolicyProvider().approvals.delete_file;
+  const projectService = new ProjectService(workspaceRepository);
+  const engineeringPreparationService = new EngineeringPreparationService(workspaceRepository, {
+    globalSettingsProvider: (): EngineeringHarnessSettings => parseEngineeringHarnessSettings(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessSettings)).settings,
+    workspaceOverrideProvider: (workspaceId): EngineeringHarnessWorkspaceOverride | undefined => parseEngineeringHarnessWorkspaceOverrides(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessWorkspaceOverrides))[workspaceId],
+  });
+  const workspaceWriterLease = new SqliteWorkspaceWriterLease(path.join(dataPath, 'workspace-writer-leases.sqlite'), Date.now, writerAdmission);
+  const processService = new ProcessService(workspaceRepository, {
+    writerAdmission,
+    nativeContainmentRoot: path.join(dataPath, 'native-managed-processes'),
+    projectService,
+    profileProvider: activePermissionProfile,
+    defaultTimeoutMsProvider: (): number => readSettings().processTimeoutMs,
+    unrestricted,
+    authorizationBypassProvider: desktopFullBypassEnabled,
+  });
+  const checkpointService = new CheckpointService(workspaceRepository, checkpointRepository, {
+    profileProvider: activePermissionProfile,
+    platform: process.platform,
+  });
+  const recoveryTrashRoot = path.join(dataPath, 'recovery-trash');
+  const pathGuard = new WorkspacePathGuard(new SecretPolicy(), { unrestricted, trustedWorkspaceAccess: true });
+  const fileService = new FileService(workspaceRepository, pathGuard, undefined, {
+    writerAdmission,
+    checkpointService,
+    profileProvider: activePermissionProfile,
+    unrestricted,
+    trustedWorkspaceAccess: true,
+    allowDeleteWithoutConfirmation: (): boolean => desktopFullBypassEnabled() || allowAiDeleteProvider(),
+    protectCriticalFiles: (): boolean => !desktopFullBypassEnabled() && destructivePolicyProvider().protectCriticalFiles,
+    recoverableDelete: (): boolean => destructivePolicyProvider().recoverableDelete,
+    recoveryTrashRoot,
+  });
+  const ponytailProfilePath = '.lnwjud/project-profile.json';
+  const readWorkspaceProfile = async (workspaceId: string): Promise<Record<string, unknown>> => {
+    const loaded = await fileService.readFile(actor, workspaceId, { path: ponytailProfilePath });
+    if (!loaded.ok) {
+      if (loaded.error.code === 'FILE_NOT_FOUND') return {};
+      throw new Error(loaded.error.message);
+    }
+    if (typeof loaded.value.content !== 'string') throw new Error('Project profile must be a UTF-8 JSON file');
+    let parsed: unknown;
+    try { parsed = JSON.parse(loaded.value.content); } catch { throw new Error('Project profile contains invalid JSON'); }
+    if (!isRecord(parsed)) throw new Error('Project profile must contain a JSON object');
+    return normalizeProjectProfile(parsed);
+  };
+  const writeWorkspacePonytailMode = async (workspaceId: string, mode: SetWorkspacePonytailModeRequest['mode']): Promise<void> => {
+    const profile = await readWorkspaceProfile(workspaceId);
+    const next: Record<string, unknown> = { ...profile };
+    const existingPonytail = isRecord(profile.ponytail) ? { ...profile.ponytail } : {};
+    if (mode === 'inherit') delete existingPonytail.mode;
+    else existingPonytail.mode = mode;
+    if (Object.keys(existingPonytail).length === 0) delete next.ponytail;
+    else next.ponytail = existingPonytail;
+    const content = `${JSON.stringify(next, null, 2)}\n`;
+    if (Buffer.byteLength(content, 'utf8') > 128 * 1024) throw new Error('Project profile exceeds 128 KiB');
+    const saved = await fileService.writeFile(actor, workspaceId, { path: ponytailProfilePath, content, overwriteExisting: true, userConfirmed: true });
+    if (!saved.ok) throw new Error(saved.error.message);
+  };
+  const buildPonytailPolicyContext = async (workspaceId: string): Promise<PonytailPolicyContext> => {
+    const workspace = await workspaceRepository.get(workspaceId);
+    if (workspace === null) throw new Error('Workspace was not found');
+    const rawGlobalMode = settingsRepository.get(USER_SETTING_KEYS.ponytailMode);
+    const globalMode = parsePonytailMode(rawGlobalMode, DEFAULT_PONYTAIL_MODE);
+    const globalSource = rawGlobalMode === 'off' || rawGlobalMode === 'lite' || rawGlobalMode === 'full' || rawGlobalMode === 'ultra' ? 'global' as const : 'default' as const;
+    const workspaceMode = workspacePonytailMode(await readWorkspaceProfile(workspaceId));
+    const workspacePolicy = resolvePonytailPolicy(globalMode, workspaceMode);
+    const goals = await goalRepository.listWorkspaceGoalsForHost(workspaceId, 50);
+    const now = new Date().toISOString();
+    const activeGoals = await Promise.all(goals.map(async (goal) => {
+      const liveLease = goal.leaseExpiresAt !== undefined && Date.parse(goal.leaseExpiresAt) > Date.parse(now);
+      const liveContinuation = await goalRepository.getLiveScheduledContinuation(goal.id) !== null;
+      const mutationObservation = await goalRepository.observeGoalFencedMutations(goal.id, now);
+      const liveMutation = mutationObservation.liveFencedCallCount > 0;
+      const editBlockedReason = liveLease ? 'live_lease' as const : liveContinuation ? 'live_continuation' as const : liveMutation ? 'live_mutation' as const : null;
+      const mode: SetGoalPonytailModeRequest['mode'] = goal.ponytailMode ?? 'inherit';
+      const effective = resolvePonytailPolicy(globalMode, workspaceMode, mode);
+      return {
+        goalId: goal.id,
+        goalKey: goal.goalKey,
+        mode,
+        revision: goal.revision,
+        effectiveMode: effective.mode,
+        effectiveSource: mode !== 'inherit' ? 'goal' as const : workspaceMode !== 'inherit' ? 'workspace' as const : globalSource,
+        editable: editBlockedReason === null,
+        editBlockedReason,
+      };
+    }));
+    return {
+      workspaceId,
+      globalMode,
+      workspaceMode,
+      effectiveWorkspaceMode: workspacePolicy.mode,
+      effectiveWorkspaceSource: workspaceMode !== 'inherit' ? 'workspace' : globalSource,
+      activeGoals,
+    };
+  };
+  const workspaceInfoService = new WorkspaceInfoService(workspaceRepository, workspaceService, unrestricted);
+  const workspaceQueryService = new WorkspaceQueryService(workspaceRepository, pathGuard);
+  const searchService = new SearchService(workspaceRepository);
+  const projectSnapshotService = new ProjectSnapshotService(workspaceRepository, {
+    projectService,
+    gitService,
+    workspaceQuery: workspaceQueryService,
+    processService,
+  });
+  const codexService = new CodexService(workspaceRepository, {
+    auditService,
+    profileProvider: activePermissionProfile,
+  });
+  // This is intentionally composed only in Desktop. Its service derives one
+  // exact host-global instruction path and is not an outside-workspace file
+  // adapter for CLI or arbitrary MCP callers.
+  const codexRulesService = new CodexRulesService({
+    codexHomeProvider: (): string => process.env.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex'),
+    backupRootProvider: (): string => path.join(dataPath, 'codex-rules-backups'),
+    hostIdentityProvider: (): string => `${os.userInfo().username}@${os.hostname()}`,
+  });
+  const agentSwarmService = new AgentSwarmService(new SqliteAgentSwarmRepository(database), codexService);
+  const capabilityRuntime = createLocalCapabilityRuntime(dataPath, async (): Promise<readonly string[]> => (
+    (await workspaceRepository.list())
+      .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath))
+      .map((workspace) => workspace.realRootPath)
+  ), unrestricted, () => readSettings().capabilityRoots, () => readSettings().shellSynchronousWaitSeconds, options.nativeCapabilityApi);
+  const approvalWork = options.hostMutationApprovalProvider === undefined ? null
+    : new DesktopApprovalWork(path.join(dataPath, 'approval-work'), options.hostMutationApprovalProvider);
+  const hostMutationApprovalProvider = approvalWork === null
+    ? undefined
+    : createPresentedHostMutationApprovalProvider((request, context) => approvalWork.request(request, context), capabilityRuntime.domCdp);
+  const taskCancellation = new GoalTaskCancellationService([
+    { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
+    { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
+    { provider: 'shell', cancelForGoal: capabilityRuntime.shell.cancelForGoal.bind(capabilityRuntime.shell) },
+  ]);
+  const requestCancellation = new GoalRequestCancellationService();
+  const goalMutationFence = new GoalMutationFenceService(goalRepository, {
+    taskStateReader: new RuntimeGoalManagedTaskStateReader({
+      process: processService,
+      codex: codexService,
+      shell: capabilityRuntime.shell,
+    }),
+  });
+  const engineeringSourceState = createEngineeringSourceStateProvider(async (workspaceId, args) => gitService.run(actor, { workspaceId, args }));
+  const engineeringArtifactVerifier = createEngineeringArtifactVerifier(async (workspaceId) => (await workspaceRepository.get(workspaceId))?.realRootPath);
+  const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
+    engineeringEvidenceVerifier: new RuntimeEngineeringEvidenceVerifier({
+      process: processService,
+      shell: capabilityRuntime.shell,
+      sourceState: engineeringSourceState,
+      artifactVerifier: engineeringArtifactVerifier,
+    }),
+    scheduledContinuations: goalRepository,
+    workerLiveness: goalMutationFence,
+    taskCancellation,
+    requestCancellation,
+  });
+  async function buildEngineeringHarnessStatus(selectedWorkspace: Workspace | null): Promise<DashboardEngineeringHarnessStatus> {
+    const settings = readSettings();
+    const harness = settings.engineeringHarness ?? {
+      schemaVersion: 1 as const,
+      enabled: false,
+      profile: 'senior' as const,
+      applyTo: 'coding_projects' as const,
+      autoProjectAssessment: true,
+    };
+    const diagnostic = settings.engineeringHarnessDiagnostic ?? null;
+    if (selectedWorkspace === null) {
+      return {
+        workspaceId: null,
+        enabled: false,
+        source: 'unavailable',
+        profile: harness.profile,
+        policyDigest: null,
+        reasons: ['No workspace is selected.'],
+        diagnostic,
+        task: null,
+      };
+    }
+
+    const workspaceGoals = await goalRepository.listWorkspaceGoalsForHost(selectedWorkspace.id, 100);
+    const activeGoal = workspaceGoals.find((goal) => goal.status === 'active' && goal.engineering !== undefined);
+    const workspaceOverride = settings.engineeringHarnessWorkspaceOverrides?.[selectedWorkspace.id];
+    if (!harness.enabled && workspaceOverride?.mode !== 'on' && activeGoal === undefined) {
+      return {
+        workspaceId: selectedWorkspace.id,
+        enabled: false,
+        source: workspaceOverride?.mode === 'off' ? 'workspace' : 'global',
+        profile: workspaceOverride?.profile ?? harness.profile,
+        policyDigest: null,
+        reasons: [workspaceOverride?.mode === 'off' ? 'Engineering Harness is disabled for this workspace.' : 'Engineering Harness is Off.'],
+        diagnostic,
+        task: null,
+      };
+    }
+
+    const prepared = await engineeringPreparationService.prepare(
+      selectedWorkspace.id,
+      activeGoal?.objective ?? 'Implement software code in this project',
+      activeGoal?.engineering?.scopedPath,
+    );
+    if (!prepared.ok) {
+      return {
+        workspaceId: selectedWorkspace.id,
+        enabled: false,
+        source: 'unavailable',
+        profile: workspaceOverride?.profile ?? harness.profile,
+        policyDigest: null,
+        reasons: [prepared.error.message],
+        diagnostic,
+        task: toEngineeringDashboardTask(activeGoal),
+      };
+    }
+    return {
+      workspaceId: selectedWorkspace.id,
+      enabled: prepared.value.policy.enabled,
+      source: prepared.value.policy.source,
+      profile: prepared.value.policy.profile,
+      policyDigest: prepared.value.policy.policyDigest,
+      reasons: prepared.value.policy.reasons,
+      diagnostic,
+      task: toEngineeringDashboardTask(activeGoal),
+    };
+  }
+  const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
+    workerLiveness: goalMutationFence,
+    automationResumes: automationRepository,
+  });
+  const extensionsService: ExtensionsService = createLocalExtensionsService({
+    settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
+    settingsJsonProvider: () => settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
+    workspaceRootProvider: async (): Promise<string | undefined> => {
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      return selected?.realRootPath;
+    },
+    callTimeoutMs: readSettings().mcpCallTimeoutMs,
+    idleTimeoutMs: readSettings().mcpIdleTimeoutMs,
+  });
+  const debugSessions = new DapSessionService();
+  const chromeWork: DesktopRuntime['chromeWork'] = approvalWork === null ? null : {
+    prepare: prepareChromeWorkLaunch,
+    register: async (ticket): ReturnType<DesktopApprovalWork['registerChromeWork']> => { await assertChromeLaunchScope(ticket); return approvalWork.registerChromeWork(ticket); },
+    reconnect: async (ticket, revision, sessionId): ReturnType<DesktopApprovalWork['reconnectChromeWork']> => { await assertChromeLaunchScope(ticket); return approvalWork.reconnectChromeWork(ticket, revision, sessionId); },
+  };
+  const mcpServices: McpApplicationServices = {
+    ...(chromeWork === null || approvalWork === null ? {} : { chromeWork: createChromeWorkMcp(chromeWork, approvalWork) }),
+    platform: process.platform,
+    runtimeStatePath: path.join(dataPath, 'upgrade-runtime.json'),
+    ...(options.eccRuntimeOptions === undefined ? {} : { eccRuntimeOptions: options.eccRuntimeOptions }),
+    eccEnabledProvider: (): boolean => readSettings().eccEnabled === true,
+    runtimeTiming: () => ({ mcpPollWaitSeconds: readSettings().mcpPollWaitSeconds }),
+    localProviders: () => {
+      const settings = readSettings();
+      return {
+        ...(settings.pdfProviderPath.trim().length === 0 ? {} : { pdfProvider: settings.pdfProviderPath }),
+        lspCommands: settings.lspCommands,
+      };
+    },
+    capabilities: capabilityRuntime.service,
+    debugSessions,
+    extensions: extensionsService,
+    workspaceInfo: workspaceInfoService,
+    workspaceWriterLease,
+    workspaceQuery: workspaceQueryService,
+    projectSnapshot: projectSnapshotService,
+    project: projectService,
+    engineeringPreparation: engineeringPreparationService,
+    file: fileService,
+    checkpoint: checkpointService,
+    goals: goalService,
+    callHistory: new CallHistoryService(workspaceRepository, auditRepository),
+    taskResults: new TaskResultService(goalService, auditRepository, workspaceRepository, goalRepository),
+    resourceSnapshot: new ResourceSnapshotService(workspaceRepository, goalService),
+    officeDataWorkflow: new OfficeDataWorkflowService(async (id) => (await workspaceRepository.get(id))?.realRootPath ?? null),
+    workflowTemplates: new WorkflowTemplateService(workspaceRepository),
+    workflowStart: new WorkflowStartService(new WorkflowTemplateService(workspaceRepository), goalService),
+    goalRequestCancellation: requestCancellation,
+    scheduledContinuations: scheduledContinuationService,
+    goalMutationFence,
+    search: searchService,
+    workspaceIndex,
+    git: gitService,
+    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath)),
+    process: processService,
+    codex: codexService,
+    codexRules: codexRulesService,
+    agentSwarm: agentSwarmService,
+    automationFactory: {
+      create(runtime) {
+        return new AutomationService(
+          automationRepository,
+          goalService,
+          runtime,
+          new AutomationVerifier(workspaceRepository, runtime, pathGuard),
+        );
+      },
+    },
+  };
+  const activityLogPath = mcpActivityLogPath(dataPath);
+  const logSessionId = options.logSessionId?.trim() || undefined;
+  const fileActivitySink = createFileActivitySink(activityLogPath);
+  const toLogActivityEvent = (event: ActivitySinkEvent): ActivitySinkEvent => logSessionId === undefined
+    ? event
+    : { ...event, sessionId: logSessionId };
+  let activityLogDiagnostic: ((key: string, message: string) => void) | null = null;
+  const activityTracker = new ActivityTracker(
+    { record: (event): Promise<void> => fileActivitySink.record(toLogActivityEvent(event)) },
+    (error, event) => {
+      const message = error instanceof Error ? error.message : String(error);
+      activityLogDiagnostic?.(
+        'activity-sink:' + event.callId + ':' + event.phase + ':' + message,
+        '[ERROR] MCP activity logging failed — ' + message,
+      );
+    },
+    {
+      async record(event: ActivitySinkEvent, detail): Promise<void> {
+        const loggedEvent = toLogActivityEvent(event);
+        await auditService.recordMcpTool({
+          actorId: mcpActor.clientId,
+          actorName: mcpActor.clientName,
+          ...(loggedEvent.workspaceId === undefined ? {} : { workspaceId: loggedEvent.workspaceId }),
+          ...(loggedEvent.sessionId === undefined ? {} : { sessionId: loggedEvent.sessionId }),
+          toolName: event.toolName,
+          ...(event.goalId === undefined ? {} : { goalId: event.goalId }),
+          ...(event.goalId === undefined || event.mutationReceipt === undefined ? {} : { mutationReceipt: event.mutationReceipt }),
+          callId: event.callId,
+          phase: event.phase,
+          ...(event.targetSummary === undefined ? {} : { targetSummary: event.targetSummary }),
+          targetDetail: event.targetDetail ?? decodeActivityTargetReference(undefined, event.targetSummary),
+          ...(detail === undefined ? {} : { activityTargetDetail: detail }),
+          resultCode: event.resultCode,
+          ...(event.resultMessage === undefined ? {} : { resultMessage: event.resultMessage }),
+          ...(event.traceId === undefined ? {} : { traceId: event.traceId }),
+          ...(event.traceParent === undefined ? {} : { traceParent: event.traceParent }),
+          ...(event.authorizationMode === undefined ? {} : { authorizationMode: event.authorizationMode }),
+          durationMs: event.durationMs,
+          timestamp: event.timestamp,
+        });
+        activitySessionCatalog.record(loggedEvent);
+      },
+    },
+  );
+  const mcpPort = readMcpPort(process.env.LNWJUD_MCP_PORT ?? settingsRepository.get(USER_SETTING_KEYS.mcpHttpPort) ?? undefined);
+  const mcpAllowedHostnames = parseMcpAllowedHostnames(process.env.LNWJUD_MCP_ALLOWED_HOSTNAMES ?? settingsRepository.get(USER_SETTING_KEYS.mcpAllowedHostnames) ?? undefined);
+  // One transport-owned ledger is shared across Modern HTTP requests and the
+  // Desktop read-only diagnostics view. It is not a per-Goal counter.
+  const desktopContextEconomy = new ContextEconomyRuntime();
+  const mcpLifecycle = new DesktopMcpLifecycle({
+    createServerOptions: (): McpHttpServerOptions => ({
+      contextEconomy: desktopContextEconomy,
+      port: mcpPort,
+      allowedHostnames: mcpAllowedHostnames,
+      services: mcpServices,
+      actor: mcpActor,
+      activityTracker,
+      profileProvider: activePermissionProfile,
+      authorizationModeProvider: (): 'standard' | 'full_bypass' => desktopFullBypassEnabled() ? 'full_bypass' : 'standard',
+      allowAiDeleteProvider,
+      destructivePolicyProvider,
+      activeWorkspaceScopeProvider: async (): Promise<WorkspaceScope | null> => {
+        const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+        return selected === null ? null : { workspaceId: selected.id, rootPath: selected.realRootPath };
+      },
+      activeWorkspaceScopesProvider: async (): Promise<readonly WorkspaceScope[]> => (
+        (await resolveActiveProjectWorkspaces()).map((workspace) => ({ workspaceId: workspace.id, rootPath: workspace.realRootPath }))
+      ),
+      ...(hostMutationApprovalProvider === undefined ? {} : { hostMutationApprovalProvider }),
+      codexToolsEnabledProvider: () => readSettings().codexToolsEnabled,
+      ponytailModeProvider: () => readSettings().ponytailMode,
+      engineeringHarnessEnabledProvider: (): boolean => {
+        const settings = readSettings();
+        return settings.engineeringHarness?.enabled === true
+          || Object.values(settings.engineeringHarnessWorkspaceOverrides ?? {}).some((entry) => entry.mode === 'on');
+      },
+      toolAvailabilitySnapshotProvider: () => toolAvailabilityService.snapshot(),
+      toolAvailabilitySubscribe: (listener) => toolAvailabilityService.subscribe(listener),
+    }),
+  });
+  let watcherHandle: WatcherServerHandle | null = null;
+  let watcherStartOperation: Promise<string | null> | null = null;
+  const startWatcher = (): Promise<string | null> => {
+    if (watcherHandle !== null) return Promise.resolve(watcherHandle.endpoint.toString());
+    if (watcherStartOperation !== null) return watcherStartOperation;
+
+    const operation = resolveWatcherAccessToken().then((accessToken) => startWatcherServer({
+      port: readWatcherPort(process.env.LNWJUD_WATCHER_PORT, DEFAULT_WATCHER_PORT, 'LNWJUD_WATCHER_PORT'),
+      pairingPort: readWatcherPort(process.env.LNWJUD_WATCHER_PAIR_PORT, DEFAULT_WATCHER_PAIRING_PORT, 'LNWJUD_WATCHER_PAIR_PORT'),
+      accessToken,
+      subscribeActivity: (listener) => activityTracker.subscribe((event) => listener(watcherActivityFromSink(event))),
+      buildSnapshot: async (recentActivity) => {
+        const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+        const activeWorkspaces = await resolveActiveProjectWorkspaces();
+        const activeWorkspaceIds = new Set(activeWorkspaces.map((workspace) => workspace.id));
+        const inflight = activityTracker.listInFlight().filter(
+          (entry) => entry.workspaceId === undefined || activeWorkspaceIds.has(entry.workspaceId),
+        );
+
+        const workspaceStates = await Promise.all(activeWorkspaces.map(async (workspace) => {
+          const [goals, gitStatus, gitBranch, gitLog] = await Promise.all([
+            goalRepository.listWorkspaceGoalsForHost(workspace.id, 50),
+            gitService.statusSummary(actor, workspace.id),
+            gitService.branch(actor, workspace.id),
+            gitService.log(actor, workspace.id, { maxCommits: 1 }),
+          ]);
+          const workspaceInflight = inflight.filter((entry) => entry.workspaceId === workspace.id);
+          const goalSnapshots = goals.map((goal) => watcherGoalFromRecord(goal, workspace.displayName));
+          const git: WatcherSnapshot['git'] = {
+            branch: gitBranch.ok ? gitBranch.value ?? '' : '',
+            commit: gitLog.ok ? gitLog.value.entries[0]?.hash.slice(0, 12) ?? '' : '',
+            clean: gitStatus.ok ? gitStatus.value.entries.length === 0 : true,
+            changedFiles: gitStatus.ok ? gitStatus.value.entries.length : 0,
+            ...(gitLog.ok && gitLog.value.entries[0]?.subject ? { latestSubject: gitLog.value.entries[0].subject.slice(0, 300) } : {}),
+            ...(gitLog.ok && gitLog.value.entries[0]?.date ? { latestAt: gitLog.value.entries[0].date } : {}),
+          };
+          return { workspace, goals, goalSnapshots, inflight: workspaceInflight, git };
+        }));
+
+        const primaryWorkspace = workspaceStates.find((item) => item.workspace.id === selected?.id) ?? workspaceStates[0];
+        const primaryGoal = primaryWorkspace?.goalSnapshots[0] ?? null;
+        const allGoals = workspaceStates.flatMap((item) => item.goalSnapshots);
+        const pluginListing = await extensionsService.listMcpServers().catch(() => null);
+        const plugins = pluginListing?.ok ? watcherPluginsFromServers(pluginListing.value.servers) : [];
+
+        const checkpointActivity: WatcherActivityEvent[] = workspaceStates.flatMap((item) => (
+          item.goals.flatMap((goal) => (
+            [...goal.checkpoints].reverse().slice(0, 20).map((checkpoint) => ({
+              id: `checkpoint:${checkpoint.id}`,
+              timestamp: checkpoint.createdAt,
+              kind: 'goal.checkpoint',
+              status: checkpoint.blockers.length > 0 ? 'blocked' as const : 'done' as const,
+              actor: '@lnwjud',
+              summary: checkpoint.currentPhase.length > 0 ? checkpoint.currentPhase : 'Goal checkpoint',
+              ...(checkpoint.nextAction.length === 0 ? {} : { detail: checkpoint.nextAction.slice(0, 500) }),
+              workspaceId: item.workspace.id,
+            }))
+          ))
+        ));
+
+        const activity = [
+          ...recentActivity.filter((event) => event.workspaceId === undefined || activeWorkspaceIds.has(event.workspaceId)),
+          ...checkpointActivity,
+        ]
+          .filter((event, index, all) => all.findIndex((candidate) => candidate.id === event.id) === index)
+          .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
+          .slice(0, 100);
+
+        const agents = workspaceStates.flatMap((item): WatcherSnapshot['agents'] => {
+          const latestInflight = [...item.inflight].sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+          const hasBlockedGoal = item.goalSnapshots.some((goal) => goal.status === 'blocked');
+          const primaryWorkspaceGoal = item.goalSnapshots[0];
+          let orchestratorTask = latestInflight?.targetSummary?.slice(0, 500)
+            ?? latestInflight?.toolName.replaceAll('_', ' ').slice(0, 500);
+          if (primaryWorkspaceGoal !== undefined && primaryWorkspaceGoal.currentTask.trim().length > 0) {
+            orchestratorTask = primaryWorkspaceGoal.currentTask.slice(0, 500);
+          }
+          let orchestratorStatus: WatcherStatus = 'idle';
+          if (item.inflight.length > 0) orchestratorStatus = 'running';
+          else if (hasBlockedGoal) orchestratorStatus = 'blocked';
+          const workspaceAgents: Array<WatcherSnapshot['agents'][number]> = [{
+            id: `lnwjud:${item.workspace.id}`,
+            name: '@lnwjud',
+            role: 'Orchestrator',
+            status: orchestratorStatus,
+            provider: 'lnwjud',
+            ...(orchestratorTask === undefined || orchestratorTask.length === 0 ? {} : { task: orchestratorTask }),
+            workspaceId: item.workspace.id,
+            workspaceName: item.workspace.displayName,
+          }];
+
+          for (const entry of item.inflight.filter((candidate) => /^(codex|delegate_|agent_swarm_)/.test(candidate.toolName))) {
+            workspaceAgents.push({
+              id: `${entry.toolName}:${entry.callId}`,
+              name: 'Codex',
+              role: 'Implementation / Review',
+              status: 'running',
+              provider: 'codex',
+              toolName: entry.toolName,
+              startedAt: entry.startedAt,
+              ...(entry.targetSummary === undefined ? {} : { task: entry.targetSummary.slice(0, 500) }),
+              workspaceId: item.workspace.id,
+              workspaceName: item.workspace.displayName,
+            });
+          }
+          return workspaceAgents;
+        });
+
+        const unscopedInflight = inflight.filter((entry) => entry.workspaceId === undefined);
+        if (unscopedInflight.length > 0) {
+          const latestUnscoped = [...unscopedInflight].sort((left, right) => right.startedAt.localeCompare(left.startedAt))[0];
+          const unscopedTask = latestUnscoped?.targetSummary?.slice(0, 500)
+            ?? latestUnscoped?.toolName.replaceAll('_', ' ').slice(0, 500);
+          agents.push({
+            id: 'lnwjud:runtime',
+            name: '@lnwjud',
+            role: 'Runtime',
+            status: 'running',
+            provider: 'lnwjud',
+            ...(unscopedTask === undefined || unscopedTask.length === 0 ? {} : { task: unscopedTask }),
+          });
+        }
+
+        const allGoalsBlocked = allGoals.length > 0 && allGoals.every((goal) => goal.status === 'blocked');
+        let runtimeStatus: WatcherStatus = 'idle';
+        if (inflight.length > 0) runtimeStatus = 'running';
+        else if (allGoalsBlocked) runtimeStatus = 'blocked';
+
+        return {
+          protocolVersion: 1,
+          serverTime: new Date().toISOString(),
+          runtime: {
+            version: APP_VERSION,
+            status: runtimeStatus,
+            activeOperations: inflight.length,
+          },
+          instance: {
+            id: watcherInstanceId,
+            name: os.hostname(),
+            platform: watcherPlatform(process.platform),
+          },
+          goal: primaryGoal,
+          workspaces: workspaceStates.map((item) => ({
+            id: item.workspace.id,
+            name: item.workspace.displayName,
+            selected: item.workspace.id === selected?.id,
+            activeOperations: item.inflight.length,
+            goals: item.goalSnapshots,
+            git: item.git,
+          })),
+          agents,
+          plugins,
+          activity,
+          git: primaryWorkspace?.git ?? { branch: '', commit: '', clean: true, changedFiles: 0 },
+        };
+      },
+    })).then((handle) => {
+      watcherHandle = handle;
+      return handle.endpoint.toString();
+    }).finally(() => {
+      watcherStartOperation = null;
+    });
+
+    watcherStartOperation = operation;
+    return operation;
+  };
+
+  const tunnelSecretDecryptOption = options.decryptTunnelSecret === undefined
+    ? {}
+    : { decryptSecret: options.decryptTunnelSecret };
+  const legacyTunnelAuthProvider = new LegacyApiKeyCredentialProvider({
+    secretPath: (): string => legacyTunnelSecretPath(),
+    ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
+    ...tunnelSecretDecryptOption,
+  });
+  const oauthTunnelBackend = options.tunnelOAuthBackend ?? unavailableTunnelOAuthBackend();
+  const oauthTunnelAuthProvider = new OAuthTunnelAuthProvider({
+    backend: oauthTunnelBackend,
+    sessionStore: new TunnelOAuthSessionStore({
+      filePath: oauthTunnelSessionPath(),
+      ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
+      ...tunnelSecretDecryptOption,
+    }),
+    expectedTunnelId: (): string | null => settingsRepository.get(tunnelIdentitySettingKey),
+  });
+  const tunnelAuthCoordinator = new TunnelAuthCoordinator(
+    legacyTunnelAuthProvider,
+    oauthTunnelAuthProvider,
+    {
+      get: (): TunnelAuthMode | null => {
+        const value = settingsRepository.get(tunnelAuthModeSettingKey);
+        return value === 'oauth' || value === 'legacy_api_key' ? value : null;
+      },
+      set: (mode: TunnelAuthMode): void => { settingsRepository.set(tunnelAuthModeSettingKey, mode); },
+    },
+  );
+  const tunnelController = new TunnelController({
+    getClientPath: (): string | null => settingsRepository.get(CLIENT_PATH_SETTING),
+    getBundledClientPath: bundledTunnelClientPath,
+    setClientPath: (value: string): void => { settingsRepository.set(CLIENT_PATH_SETTING, value); },
+    getDataPath: (): string => dataPath,
+    authProvider: tunnelAuthCoordinator,
+    ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
+    getMcpServerUrl: async (): Promise<string | null> => {
+      const status = await mcpLifecycle.start();
+      return status.url;
+    },
+    ...(process.env.LNWJUD_E2E_FIXTURE === '1'
+      ? { isExternalTunnelRunning: async (): Promise<boolean> => false }
+      : {}),
+    autoReconnect: (): boolean => readSettings().tunnelAutoReconnect,
+    maxAutoRestarts: (): number => readSettings().tunnelMaxAutoRestarts,
+    getTunnelId: (): string | null => settingsRepository.get(tunnelIdentitySettingKey),
+    setTunnelId: (value: string): void => { settingsRepository.set(tunnelIdentitySettingKey, value.trim()); },
+    getRuntimeDesiredState: (): 'running' | 'stopped' | null => {
+      const value = settingsRepository.get(tunnelRuntimeDesiredStateSettingKey);
+      return value === 'running' || value === 'stopped' ? value : null;
+    },
+    setRuntimeDesiredState: (value: 'running' | 'stopped'): void => { settingsRepository.set(tunnelRuntimeDesiredStateSettingKey, value); },
+    getRuntimeOwnerPath: (): string | null => settingsRepository.get(tunnelRuntimeOwnerPathSettingKey),
+    setRuntimeOwnerPath: (value: string): void => { settingsRepository.set(tunnelRuntimeOwnerPathSettingKey, value.trim()); },
+  });
+  const remoteMcpController = new RemoteMcpController({
+    dataPath,
+    getLocalMcpUrl: async (): Promise<string | null> => mcpLifecycle.status().url,
+    ensureLocalMcpUrl: async (): Promise<string | null> => (await mcpLifecycle.start()).url,
+    onInstallProgress: (phase): void => { options.onInstallActivity?.('ngrok', { phase, progressPercent: null, message: null }); },
+    ...(options.secretProtector === undefined ? {} : { secretProtector: options.secretProtector }),
+  });
+  const withInstallActivity = async <T>(
+    kind: 'ngrok' | 'pdf_provider',
+    message: string,
+    operation: () => Promise<T>,
+  ): Promise<T> => {
+    options.onInstallActivity?.(kind, { phase: 'preparing', progressPercent: null, message });
+    try {
+      return await operation();
+    } finally {
+      options.onInstallActivity?.(kind, null);
+    }
+  };
+  const withNgrokInstallIfNeeded = async <T>(operation: () => Promise<T>): Promise<T> => {
+    const status = await remoteMcpController.status();
+    return status.transport !== 'ngrok' || status.installed
+      ? operation()
+      : withInstallActivity('ngrok', 'Installing ngrok…', operation);
+  };
+  const oauthLoginManager = new TunnelOAuthLoginManager({
+    backend: oauthTunnelBackend,
+    provider: oauthTunnelAuthProvider,
+    coordinator: tunnelAuthCoordinator,
+    onAuthModeChanged: async (): Promise<void> => {
+      const status = await reconcileTunnelAfterAuthModeChange();
+      if (status.profileExists && status.state !== 'running') {
+        throw new Error(status.message ?? 'Tunnel did not return to running state after authentication change');
+      }
+    },
+  });
+  async function reconcileTunnelAfterAuthModeChange(): Promise<TunnelStatus> {
+    tunnelController.markAuthConfigurationChanged();
+    let status = await tunnelController.status();
+    const credentialAvailable = status.runtimeCredentialAvailable ?? status.authReady ?? status.hasApiKey;
+    if (!credentialAvailable) {
+      if (status.state === 'running' || status.state === 'starting') status = await tunnelController.stop();
+      return status;
+    }
+    if (status.profileExists && status.clientPath !== null) status = await tunnelController.start();
+    return status;
+  }
+  const logHub = new LogHub({
+    tunnelLogPath: tunnelController.logPath(),
+    mcpActivityLogPath: activityLogPath,
+  });
+  activityLogDiagnostic = (key, message): void => {
+    logHub.feedIfNew('mcp', key, 'error', message);
+  };
+  const trackedProcesses = new Map<string, string>();
+  const gitSummaryCache = new AsyncTtlCache<DashboardSnapshot['gitSummary']>(5_000);
+  const codexSummaryCache = new AsyncTtlCache<DashboardSnapshot['codex']>(60_000);
+  const codexPresenceCache = new AsyncTtlCache<boolean>(60_000);
+  const capabilitySummaryCache = new AsyncTtlCache<DashboardSnapshot['capabilities']>(15_000);
+  let gitSummaryWorkspaceId: string | null = null;
+  let lastRecoveryRetentionSweepAt = 0;
+  const recoveryRetentionSweepIntervalMs = 6 * 60 * 60 * 1000;
+
+  async function sweepRecoveryRetention(force = false): Promise<void> {
+    const retentionDays = readSettings().recoveryRetentionDays;
+    if (retentionDays <= 0) return;
+    const now = Date.now();
+    if (!force && now - lastRecoveryRetentionSweepAt < recoveryRetentionSweepIntervalMs) return;
+    const cutoffIso = new Date(now - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    const [trashDeleted, checkpointsDeleted, archivedBackupsDeleted] = await Promise.all([
+      fileService.purgeRecoveryItemsOlderThan(cutoffIso),
+      checkpointRepository.deleteOlderThan(cutoffIso),
+      backupService.purgeArchivedOlderThan(cutoffIso),
+    ]);
+    lastRecoveryRetentionSweepAt = now;
+    if (trashDeleted > 0 || checkpointsDeleted > 0 || archivedBackupsDeleted > 0) {
+      console.log('[Recovery] retention=' + retentionDays + 'd purged trash=' + trashDeleted + ' checkpoints=' + checkpointsDeleted + ' archivedBackups=' + archivedBackupsDeleted);
+    }
+  }
+
+  function recordPersistentTunnelStatus(status: TunnelStatus): void {
+    const persistent = status.persistent;
+    if (persistent === null) return;
+    const authMode = status.auth?.mode ?? 'legacy_api_key';
+    const stateKey = [authMode, persistent.mode, persistent.state, persistent.healthy, persistent.ready, persistent.pollHealthy, persistent.reconnectCount, persistent.lastErrorCode].join(':');
+    const level = persistent.state === 'error' || persistent.state === 'auth-required' ? 'error'
+      : persistent.state === 'reconnecting' || persistent.healthy === false || persistent.ready === false || persistent.pollHealthy === false ? 'warn'
+        : 'info';
+    const detail = [
+      '[persistent-runtime]',
+      'auth=' + authMode,
+      'alias=' + persistent.runtimeAlias,
+      'tunnel=' + (persistent.tunnelIdMasked ?? 'unconfigured'),
+      'mode=' + persistent.mode,
+      'state=' + persistent.state,
+      'health=' + triStateLabel(persistent.healthy),
+      'ready=' + triStateLabel(persistent.ready),
+      'poll=' + triStateLabel(persistent.pollHealthy),
+      'reconnects=' + persistent.reconnectCount,
+      ...(persistent.lastErrorCode === null ? [] : ['error=' + persistent.lastErrorCode]),
+    ].join(' ');
+    logHub.feedIfNew('tunnel', 'persistent-runtime:' + stateKey, level, detail);
+  }
+
+  function withOAuthCapability(status: TunnelStatus): TunnelStatus {
+    const oauthAvailable = oauthTunnelBackend.descriptor.enabled && oauthTunnelBackend.descriptor.supportsTunnelProvisioning;
+    return {
+      ...status,
+      oauth: {
+        available: oauthAvailable,
+        providerId: oauthTunnelBackend.descriptor.id || null,
+        reason: oauthAvailable ? null : 'OpenAI does not currently expose a supported Secure MCP Tunnel OAuth provisioning contract; Runtime API key setup remains available.',
+      },
+    };
+  }
+
+  async function observedTunnelStatus(): Promise<TunnelStatus> {
+    const observed = withOAuthCapability(await tunnelController.status());
+    recordPersistentTunnelStatus(observed);
+    return observed;
+  }
+
+  async function resolveManageableWorkspace(workspaceId: string): Promise<Workspace> {
+    const workspace = await workspaceRepository.getAny(workspaceId);
+    if (workspace === null) throw new Error('Workspace was not found');
+    if (isMachineRootPath(workspace.realRootPath) || isMachineRootPath(workspace.rootPath)) {
+      throw new Error('Machine-root workspaces are managed automatically and cannot be archived or deleted');
+    }
+    return workspace;
+  }
+
+  async function resolveActiveProjectWorkspaces(): Promise<readonly Workspace[]> {
+    const workspaces = (await workspaceService.list()).filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
+    if (workspaces.length === 0) {
+      settingsRepository.delete(activeWorkspaceIdsSettingKey);
+      settingsRepository.delete(selectedWorkspaceSettingKey);
+      return [];
+    }
+    const byId = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+    const storedIds = parseStoredWorkspaceIds(settingsRepository.get(activeWorkspaceIdsSettingKey));
+    const ids = storedIds.filter((id) => byId.has(id));
+    const storedSelectedId = settingsRepository.get(selectedWorkspaceSettingKey);
+    let selectedId = storedSelectedId !== null && byId.has(storedSelectedId) ? storedSelectedId : null;
+    if (selectedId === null) {
+      selectedId = ids[0] ?? workspaces[0]!.id;
+      settingsRepository.set(selectedWorkspaceSettingKey, selectedId);
+    }
+    if (!ids.includes(selectedId)) ids.unshift(selectedId);
+    const orderedIds = [selectedId, ...ids.filter((id) => id !== selectedId)];
+    persistStoredWorkspaceIds(settingsRepository, activeWorkspaceIdsSettingKey, orderedIds);
+    return orderedIds.map((id) => byId.get(id)!).filter(Boolean);
+  }
+
+  async function activateWorkspace(workspaceId: string): Promise<void> {
+    const workspace = await resolveManageableWorkspace(workspaceId);
+    if (workspace.archivedAt !== undefined && workspace.archivedAt !== null) throw new Error('Archived workspace cannot be activated');
+    const ids = [...parseStoredWorkspaceIds(settingsRepository.get(activeWorkspaceIdsSettingKey))];
+    if (!ids.includes(workspace.id)) ids.push(workspace.id);
+    persistStoredWorkspaceIds(settingsRepository, activeWorkspaceIdsSettingKey, ids);
+  }
+
+  async function deactivateWorkspace(workspaceId: string): Promise<void> {
+    await resolveManageableWorkspace(workspaceId);
+    const active = [...await resolveActiveProjectWorkspaces()];
+    if (!active.some((workspace) => workspace.id === workspaceId)) return;
+    if (active.length <= 1) throw new Error('At least one Active Project is required');
+    const nextIds = active.filter((workspace) => workspace.id !== workspaceId).map((workspace) => workspace.id);
+    persistStoredWorkspaceIds(settingsRepository, activeWorkspaceIdsSettingKey, nextIds);
+    if (settingsRepository.get(selectedWorkspaceSettingKey) === workspaceId) settingsRepository.set(selectedWorkspaceSettingKey, nextIds[0]!);
+  }
+
+  async function assertWorkspaceIdle(workspaceId: string): Promise<void> {
+    if (activityTracker.listInFlight().some((entry) => entry.workspaceId === workspaceId)) {
+      throw new Error('Workspace has MCP work in progress; wait for it to finish before archiving or deleting it');
+    }
+    for (const [processId, ownerWorkspaceId] of trackedProcesses) {
+      if (ownerWorkspaceId !== workspaceId) continue;
+      const status = await processService.status(actor, workspaceId, processId);
+      if (!status.ok) {
+        if (status.error.code === 'PROCESS_NOT_FOUND') trackedProcesses.delete(processId);
+        continue;
+      }
+      if (status.value.state === 'starting' || status.value.state === 'running' || status.value.state === 'termination_unverified') {
+        throw new Error('Workspace has a managed process running; stop it before archiving or deleting it');
+      }
+    }
+  }
+
+  async function repairSelectedWorkspace(removedWorkspaceId: string): Promise<void> {
+    const remainingIds = parseStoredWorkspaceIds(settingsRepository.get(activeWorkspaceIdsSettingKey)).filter((id) => id !== removedWorkspaceId);
+    persistStoredWorkspaceIds(settingsRepository, activeWorkspaceIdsSettingKey, remainingIds);
+    if (settingsRepository.get(selectedWorkspaceSettingKey) !== removedWorkspaceId) return;
+    const nextActive = (await resolveActiveProjectWorkspaces())[0];
+    if (nextActive === undefined) settingsRepository.delete(selectedWorkspaceSettingKey);
+    else settingsRepository.set(selectedWorkspaceSettingKey, nextActive.id);
+  }
+
+  async function requireNativeAdministrativeApproval(request: HostMutationApprovalRequest): Promise<void> {
+    const provider = hostMutationApprovalProvider;
+    if (provider === undefined) throw new Error('Native host approval is unavailable for this administrative mutation');
+    const controller = new AbortController();
+    const deadlineAt = Date.now() + HOST_MUTATION_APPROVAL_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(new Error('Native administrative approval expired')), HOST_MUTATION_APPROVAL_TIMEOUT_MS);
+    let approved = false;
+    try {
+      approved = await Promise.resolve().then(() => provider(request, {
+        signal: controller.signal,
+        deadlineAt,
+        cancel: (): void => controller.abort(new Error('Native administrative approval cancelled')),
+      }));
+    } catch {
+      approved = false;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!approved) throw new Error('Native host approval was denied for this administrative mutation');
+  }
+
+  const requirementProbeFromDoctor = async (probe: () => Promise<DoctorProbeResult>): Promise<RequirementProbeResult> => {
+    const result = await probe();
+    return { status: result.status, detail: result.message };
+  };
+  const capabilityRequirement = async (name: string): Promise<RequirementProbeResult> => {
+    const result = await capabilityRuntime.health.execute({ operation: 'check_tool', tool: name });
+    if (!result.ok) return { status: 'unknown', detail: result.error.message };
+    if (!isRecord(result.value)) return { status: 'unknown', detail: `${name} capability health response was invalid` };
+    const available = result.value.available !== false;
+    const ready = result.value.ready !== false;
+    const reason = typeof result.value.reason === 'string' ? result.value.reason : undefined;
+    const readinessReason = typeof result.value.readinessReason === 'string' ? result.value.readinessReason : undefined;
+    if (reason === 'unsupported_platform') {
+      return { status: 'fail', detail: `${name} is unsupported on ${process.platform} (unsupported_platform)` };
+    }
+    if (name === 'dom_cdp' && available && readinessReason === 'browser_not_running') {
+      return { status: 'pass', detail: 'Managed Browser is installed and will start automatically when a browser tool is used' };
+    }
+    if (ready) return { status: 'pass', detail: reason ?? `${name} is ready` };
+    return {
+      status: available ? 'fail' : 'unknown',
+      detail: reason ?? (name === 'dom_cdp' && available
+        ? 'Managed Browser needs setup before browser debugging tools can run'
+        : available ? `${name} needs setup` : `${name} is unavailable`),
+    };
+  };
+  const resolveConfiguredExecutable = async (raw: string): Promise<boolean> => {
+    const trimmed = raw.trim();
+    if (trimmed.length === 0) return false;
+    let executable = trimmed;
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (Array.isArray(parsed) && typeof parsed[0] === 'string') executable = parsed[0];
+    } catch {
+      const quoted = /^"([^"]+)"/.exec(trimmed);
+      executable = quoted?.[1] ?? trimmed.split(/\s+/, 1)[0] ?? trimmed;
+    }
+    return (await executableResolver.resolve(executable)).ok;
+  };
+  const localPdfProviderRequirement = async (): Promise<RequirementProbeResult> => {
+    const configured = readSettings().pdfProviderPath.trim();
+    if (configured.length > 0) {
+      const available = await resolveConfiguredExecutable(configured);
+      return { status: available ? 'pass' : 'warn', detail: available ? 'Configured local PDF provider is available' : 'Configured local PDF provider could not be resolved' };
+    }
+    for (const candidate of ['pdftotext.exe', 'pdftotext']) {
+      if ((await executableResolver.resolve(candidate)).ok) return { status: 'pass', detail: `${candidate} is available on PATH` };
+    }
+    return { status: 'warn', detail: 'No local PDF text provider is configured or available on PATH' };
+  };
+  const configuredLspRequirement = async (): Promise<RequirementProbeResult> => {
+    const commands = Object.values(readSettings().lspCommands).map((value) => value.trim()).filter(Boolean);
+    if (commands.length === 0) return { status: 'warn', detail: 'No local language-server command is configured' };
+    const availability = await Promise.all(commands.map(resolveConfiguredExecutable));
+    return availability.some(Boolean)
+      ? { status: 'pass', detail: `${availability.filter(Boolean).length} configured language-server command(s) resolved` }
+      : { status: 'warn', detail: 'Configured language-server commands could not be resolved' };
+  };
+  const windowsSandboxRequirement = async (): Promise<RequirementProbeResult> => {
+    if (process.platform !== 'win32') return { status: 'fail', detail: 'Windows Sandbox is supported only on Windows (unsupported_platform)' };
+    const root = process.env.SystemRoot ?? process.env.WINDIR;
+    const executable = root === undefined ? '' : path.join(root, 'System32', 'WindowsSandbox.exe');
+    return executable.length > 0 && existsSync(executable)
+      ? { status: 'pass', detail: 'WindowsSandbox.exe is available' }
+      : { status: 'warn', detail: 'Windows Sandbox feature is not installed or enabled' };
+  };
+  let lastExternalMcpProbeDetail: string | null = null;
+  const probeEnabledExternalMcpServers = async (): Promise<void> => {
+    const listed = await extensionsService.listMcpServers();
+    if (!listed.ok) {
+      lastExternalMcpProbeDetail = listed.error.message;
+      return;
+    }
+    const enabled = listed.value.servers.filter((server) => server.enabled && !server.excluded);
+    if (enabled.length === 0) {
+      lastExternalMcpProbeDetail = 'No enabled external MCP servers are configured';
+      return;
+    }
+    const unverified = enabled.filter((server) => server.lifecycle === 'termination_unverified');
+    if (unverified.length > 0) {
+      lastExternalMcpProbeDetail = unverified.map((server) => `${server.name}: termination_unverified`).join(' · ');
+      return;
+    }
+
+    const observations = await Promise.all(enabled.map(async (server) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new Error(`Timed out connecting ${server.name}`)), 15_000);
+      try {
+        const described = await extensionsService.describeMcpServer({ server: server.name }, controller.signal);
+        return described.ok
+          ? `${server.name}: connected (${described.value.tools.length} tool(s))`
+          : `${server.name}: ${described.error.message}`;
+      } catch (cause: unknown) {
+        return `${server.name}: ${cause instanceof Error ? cause.message : 'connection failed'}`;
+      } finally {
+        clearTimeout(timer);
+      }
+    }));
+    lastExternalMcpProbeDetail = observations.join(' · ');
+  };
+  const requirementDefinitions: readonly RequirementDefinition[] = [
+    { id: 'os', required: true, summaryKey: 'requirement.os', probe: async (): Promise<RequirementProbeResult> => { const profile = currentPlatformProfile(); return { status: profile.supportTier === 'unsupported' ? 'fail' : 'pass', detail: `${profile.family} ${profile.arch} (${profile.supportTier})` }; } },
+    {
+      id: 'secret_storage',
+      required: true,
+      summaryKey: 'requirement.secret_storage',
+      remediationId: 'configure_secret_storage',
+      probe: async (): Promise<RequirementProbeResult> => {
+        if (options.secretProtector === undefined) return { status: 'unknown', detail: 'Secure secret provider was not injected by the startup composition root' };
+        const status = await options.secretProtector.status();
+        if (status.secure) return { status: 'pass', detail: `${status.backend} secure storage is ready` };
+        return { status: status.reason === 'temporarily_unavailable' ? 'unknown' : 'fail', detail: status.reason === 'plaintext_backend' ? 'Linux keyring selected basic_text; plaintext encryption is disabled' : `Secure secret storage is unavailable (${status.backend})` };
+      },
+    },
+    { id: 'database', required: true, summaryKey: 'requirement.database', probe: async () => ({ status: 'pass', detail: 'SQLite database ready' }) },
+    { id: 'mcp-port', required: true, summaryKey: 'requirement.mcp_port', probe: () => requirementProbeFromDoctor(() => checkConfiguredMcpPort(mcpLifecycle.status(), mcpPort)) },
+    { id: 'platform_windows', required: false, summaryKey: 'requirement.platform_windows', probe: async () => ({ status: process.platform === 'win32' ? 'pass' : 'fail', detail: process.platform === 'win32' ? `${process.platform} ${process.arch}` : `${process.platform} ${process.arch} (unsupported_platform)` }) },
+    { id: 'platform_supported', required: false, summaryKey: 'requirement.platform_supported', probe: async (): Promise<RequirementProbeResult> => { const profile = currentPlatformProfile(); return { status: profile.supportTier === 'unsupported' ? 'fail' : 'pass', detail: `${profile.family} ${profile.arch} (${profile.supportTier})` }; } },
+    { id: 'registered_workspace', required: false, summaryKey: 'requirement.registered_workspace', remediationId: 'add_project', probe: async () => ({ status: (await workspaceService.list()).some((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath)) ? 'pass' : 'fail' }) },
+    { id: 'active_project', required: false, summaryKey: 'requirement.active_project', remediationId: 'add_project', probe: async () => ({ status: (await resolveActiveProjectWorkspaces()).length > 0 ? 'pass' : 'fail' }) },
+    { id: 'executable_git', required: false, summaryKey: 'requirement.executable_git', remediationId: 'install_git', probe: () => requirementProbeFromDoctor(() => checkExecutable(executableResolver, 'git', 'warn')) },
+    { id: 'executable_ripgrep', required: true, summaryKey: 'requirement.executable_ripgrep', remediationId: 'install_ripgrep', probe: () => requirementProbeFromDoctor(() => checkExecutable(executableResolver, 'rg', 'fail')) },
+    { id: 'codex_runtime', required: false, summaryKey: 'requirement.codex_runtime', remediationId: 'configure_codex', probe: async () => readSettings().codexToolsEnabled
+      ? requirementProbeFromDoctor(() => checkCodex(codexDiscovery))
+      : { status: 'pass', detail: 'Codex runtime probe deferred while Codex tools are disabled' } },
+    { id: 'wsl_runtime', required: false, summaryKey: 'requirement.wsl_runtime', remediationId: 'configure_wsl', probe: () => capabilityRequirement('wsl_exec') },
+    { id: 'local_mcp_listener', required: true, summaryKey: 'requirement.local_mcp_listener', probe: async () => ({ status: mcpLifecycle.status().running ? 'pass' : 'fail', detail: mcpLifecycle.status().url ?? 'Desktop MCP listener is stopped' }) },
+    { id: 'browser_cdp', required: false, summaryKey: 'requirement.browser_cdp', remediationId: 'configure_browser_cdp', probe: () => capabilityRequirement('dom_cdp') },
+    { id: 'windows_ui_automation', required: false, summaryKey: 'requirement.windows_ui_automation', probe: () => capabilityRequirement('accessibility') },
+    { id: 'windows_input', required: false, summaryKey: 'requirement.windows_input', probe: () => capabilityRequirement('input_event') },
+    { id: 'windows_window', required: false, summaryKey: 'requirement.windows_window', probe: () => capabilityRequirement('window') },
+    { id: 'windows_ocr', required: false, summaryKey: 'requirement.windows_ocr', probe: () => capabilityRequirement('vision') },
+    { id: 'native_accessibility', required: false, summaryKey: 'requirement.native_accessibility', probe: () => capabilityRequirement('accessibility') },
+    { id: 'native_input', required: false, summaryKey: 'requirement.native_input', probe: () => capabilityRequirement('input_event') },
+    { id: 'native_window', required: false, summaryKey: 'requirement.native_window', probe: () => capabilityRequirement('window') },
+    { id: 'native_capture', required: false, summaryKey: 'requirement.native_capture', probe: () => capabilityRequirement('vision') },
+    { id: 'native_office', required: false, summaryKey: 'requirement.native_office', probe: () => capabilityRequirement('office') },
+    { id: 'office_desktop', required: false, summaryKey: 'requirement.office_desktop', probe: () => capabilityRequirement('office') },
+    { id: 'network_access', required: false, summaryKey: 'requirement.network_access', probe: () => capabilityRequirement('web_fetch') },
+    { id: 'scheduler_runtime', required: false, summaryKey: 'requirement.scheduler_runtime', probe: () => capabilityRequirement('scheduler') },
+    {
+      id: 'tunnel_runtime',
+      required: false,
+      summaryKey: 'requirement.tunnel_runtime',
+      remediationId: 'configure_tunnel',
+      probe: async (): Promise<{ status: 'pass' | 'fail'; detail: string }> => {
+        const [tunnel, remote] = await Promise.all([tunnelController.diagnosticStatus(), remoteMcpController.status()]);
+        if (tunnel.state === 'running') return { status: 'pass', detail: tunnel.message ?? 'Secure Tunnel is active' };
+        if (remote.state === 'running' && remote.publicMcpUrl !== null) {
+          return { status: 'pass', detail: 'Not required: OAuth-protected Remote MCP is the active remote connection' };
+        }
+        return { status: 'fail', detail: tunnel.message ?? `Tunnel is ${tunnel.state}` };
+      },
+    },
+    {
+      id: 'remote_mcp_ngrok',
+      required: false,
+      summaryKey: 'requirement.remote_mcp_ngrok',
+      probe: async (): Promise<{ status: 'pass' | 'warn'; detail: string }> => {
+        const [status, tunnel] = await Promise.all([
+          remoteMcpController.status(),
+          tunnelController.diagnosticStatus(),
+        ]);
+        if (status.state === 'running' && status.publicMcpUrl !== null) {
+          return { status: 'pass', detail: `OAuth-protected Remote MCP online: ${status.publicMcpUrl}` };
+        }
+        if (tunnel.state === 'running') {
+          return { status: 'pass', detail: 'Not required: Secure Tunnel is the active remote connection' };
+        }
+        if (status.state === 'error') {
+          return { status: 'warn', detail: status.message ?? 'Remote MCP encountered an error' };
+        }
+        if (status.autoStartEnabled && status.state === 'stopped') {
+          return { status: 'warn', detail: status.message ?? 'Remote MCP auto-start is enabled but currently stopped' };
+        }
+        return {
+          status: 'pass',
+          detail: status.message ?? (status.installed ? 'Remote MCP is optional and currently stopped' : 'Remote MCP is optional; ngrok is not installed'),
+        };
+      },
+    },
+    { id: 'external_mcp_connection', required: false, summaryKey: 'requirement.external_mcp_connection', remediationId: 'connect_external_mcp', probe: async (): Promise<{ status: 'pass' | 'warn' | 'unknown'; detail: string }> => { const listed = await extensionsService.listMcpServers(); if (!listed.ok) return { status: 'unknown', detail: listed.error.message }; const enabled = listed.value.servers.filter((server) => server.enabled && !server.excluded); const unverified = enabled.filter((server) => server.lifecycle === 'termination_unverified'); const connected = enabled.filter((server) => server.connected); return { status: unverified.length > 0 ? 'warn' : connected.length > 0 ? 'pass' : 'warn', detail: lastExternalMcpProbeDetail ?? (unverified.length > 0 ? `${unverified.length} external MCP termination(s) could not be verified` : `${enabled.length} enabled external MCP server(s); ${connected.length} connected`) }; } },
+    { id: 'local_pdf_provider', required: false, summaryKey: 'requirement.local_pdf_provider', remediationId: 'configure_pdf_provider', probe: localPdfProviderRequirement },
+    { id: 'configured_lsp', required: false, summaryKey: 'requirement.configured_lsp', remediationId: 'configure_lsp', probe: configuredLspRequirement },
+    { id: 'database_target', required: false, summaryKey: 'requirement.database_target', remediationId: 'configure_database_target', probe: async () => ({ status: 'pass', detail: 'Input-dependent: provide a read-only SQLite target inside a registered workspace for each call' }) },
+    { id: 'windows_sandbox', required: false, summaryKey: 'requirement.windows_sandbox', remediationId: 'configure_windows_sandbox', probe: windowsSandboxRequirement },
+    { id: 'browser_event_stream', required: false, summaryKey: 'requirement.browser_event_stream', remediationId: 'configure_browser_events', probe: async () => ({ status: 'pass', detail: 'Input-dependent: console/network event retention is established for the selected live CDP tab at call time' }) },
+    { id: 'automation_runtime', required: false, summaryKey: 'requirement.automation_runtime', probe: async () => ({
+      status: mcpServices.automation !== undefined || mcpServices.automationFactory !== undefined ? 'pass' : 'fail',
+      detail: mcpServices.automation !== undefined || mcpServices.automationFactory !== undefined
+        ? 'Durable automation repository, Goal binding, verifier, and shell adapter are wired'
+        : 'Durable automation runtime is unavailable',
+    }) },
+    { id: 'feature_delivery', required: false, summaryKey: 'requirement.feature_delivery', probe: async () => ({ status: 'pass', detail: 'Delivery state comes from the canonical upgrade catalog' }) },
+  ];
+  const requirementRegistry = new RequirementRegistry(requirementDefinitions, { ttlMs: 30_000, timeoutMs: 2_000 });
+  const remediationRegistry = new RemediationRegistry();
+  const toolCatalogOptions: ToolCatalogServiceOptions = {
+    profileDecision: (permission): ToolProfileDecision => permission === 'UNKNOWN' ? 'UNKNOWN' : activePermissionProfile().defaults[permission],
+    codexEnabled: (): boolean => readSettings().codexToolsEnabled,
+    eccEnabled: (): boolean => readSettings().eccEnabled === true,
+    toolAvailabilitySnapshotProvider: () => toolAvailabilityService.snapshot(),
+    externalItems: (locale): Promise<readonly ToolCatalogItem[]> => projectExternalMcpTools(extensionsService, locale),
+  };
+  const toolCatalogService = new ToolCatalogService(requirementRegistry, remediationRegistry, toolCatalogOptions);
+  const tunnelDoctorCheckIds = new Set([
+    'persistent_tunnel_identity', 'runtime_alias_state', 'runtime_process_running', 'tunnel_health', 'tunnel_ready',
+    'control_plane_poll_health', 'local_mcp_binding', 'local_mcp_reachable', 'tunnel_id_matches_saved_identity',
+    'tunnel_auth_method', 'oauth_provisioning_capability', 'runtime_key_available',
+  ]);
+  const requirementIdSet = new Set(requirementRegistry.ids());
+  const buildFullDoctorReport = async (locale: UiLocale): Promise<DoctorReport> => {
+    const base = await toolCatalogService.runDoctor(undefined, locale);
+    const [tunnelStatus, remoteMcp] = await Promise.all([tunnelController.diagnosticStatus(), remoteMcpController.status()]);
+    const tunnel = withOAuthCapability(tunnelStatus);
+    recordPersistentTunnelStatus(tunnel);
+    const mcp = mcpLifecycle.status();
+    const remoteMcpActive = remoteMcp.state === 'running' && remoteMcp.publicMcpUrl !== null;
+    const tunnelHealth = remoteMcpActive ? { state: 'unavailable' as const, message: null } : await tunnelController.incidentHealth();
+    const checks = [...base.checks, ...buildPersistentTunnelDoctorChecks({ tunnel, mcp, tunnelHealth, persistentEnabled: readSettings().tunnelAutoReconnect, remoteMcpActive })];
+    return { checks, exitCode: checks.some((check) => check.required && (check.status === 'fail' || check.status === 'unknown')) ? 1 : 0 };
+  };
+  const recheckCatalogAndDoctor = async (request: RecheckToolCatalogRequest): Promise<{ readonly catalog: ToolCatalogSnapshot; readonly doctor: DoctorReport }> => {
+    const unknown = request.requirementIds.filter((id) => !requirementIdSet.has(id) && !tunnelDoctorCheckIds.has(id));
+    if (unknown.length > 0) throw new Error(`Unknown Doctor check id: ${unknown.join(', ')}`);
+    const canonicalIds = request.requirementIds.length === 0
+      ? [...requirementIdSet]
+      : request.requirementIds.filter((id) => requirementIdSet.has(id));
+    if (canonicalIds.includes('external_mcp_connection')) await probeEnabledExternalMcpServers();
+    const catalog = canonicalIds.length > 0
+      ? (await toolCatalogService.recheck(canonicalIds, request.locale)).catalog
+      : await toolCatalogService.getSnapshot(request.locale);
+    return { catalog, doctor: await buildFullDoctorReport(request.locale) };
+  };
+  const mutateToolAvailability = async (
+    request: SetToolAvailabilityRequest | ResetToolAvailabilityRequest,
+    enabled: boolean | null,
+  ): Promise<SetToolAvailabilityResult> => {
+    const beforeCatalog = await toolCatalogService.getSnapshot(request.locale);
+    const beforeItem = beforeCatalog.items.find((item) => item.origin === 'lnwjud' && item.name === request.name);
+    if (beforeItem === undefined) throw new Error(`Unknown first-party tool: ${request.name}`);
+    if (enabled === null) toolAvailabilityService.resetTool(request.name);
+    else toolAvailabilityService.setToolEnabled(request.name, enabled);
+    const catalog = await toolCatalogService.getSnapshot(request.locale);
+    const item = catalog.items.find((candidate) => candidate.origin === 'lnwjud' && candidate.name === request.name);
+    if (item === undefined) throw new Error(`Tool Catalog item disappeared after availability update: ${request.name}`);
+    const exposureChanged = beforeItem.effectiveExposed !== item.effectiveExposed;
+    const remoteMcp = exposureChanged ? await remoteMcpController.status() : null;
+    const hostSync = toolAvailabilityHostSyncDisposition(request.locale, exposureChanged, remoteMcp);
+    return {
+      item,
+      localRuntimeApplied: true,
+      mcpListChangedEmitted: exposureChanged && mcpLifecycle.status().running ? null : false,
+      clientReconnectRequired: false,
+      ...hostSync,
+    };
+  };
+
+  async function resolveWorkspaceOrThrow(workspaceId: string): Promise<Workspace> {
+    const workspace = await workspaceRepository.get(workspaceId);
+    if (workspace === null) throw new Error('Workspace was not found');
+    return workspace;
+  }
+
+  async function selectWorkspaceOnly(workspaceId: string): Promise<WorkspaceSummary> {
+    const workspace = await resolveWorkspaceOrThrow(workspaceId);
+    if (isMachineRootPath(workspace.realRootPath) || isMachineRootPath(workspace.rootPath)) throw new Error('Machine-root workspace cannot be the Primary Project');
+    await activateWorkspace(workspaceId);
+    settingsRepository.set(selectedWorkspaceSettingKey, workspaceId);
+    await resolveActiveProjectWorkspaces();
+    return toWorkspaceSummary(workspace);
+  }
+
+  async function approvalWorkspace(): Promise<string> {
+    const workspace = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+    if (workspace === null) throw new Error('Select a Primary Project before choosing approval work');
+    return workspace.id;
+  }
+
+  async function assertChromeLaunchScope(ticket: ChromeWorkLaunch): Promise<void> {
+    const { plan } = readChromeWorkLaunch(ticket);
+    if (plan.workspaceId !== await approvalWorkspace()) throw new Error('Chrome launch requires the host Primary Project');
+    const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), 3_000);
+    try {
+      const tabs = await capabilityRuntime.domCdp.listTabsIfRunning(controller.signal);
+      if (!tabs.ok || !tabs.value.ready || !tabs.value.tabs.some((tab) => tab.id === plan.tabId && sanitizeApprovalTabUrl(tab.url) === plan.pageUrl)) throw new Error('Chrome launch requires its exact existing tab and page');
+      if (plan.workspaceId !== await approvalWorkspace()) throw new Error('Chrome launch Primary Project changed');
+    } finally { clearTimeout(timer); }
+  }
+
+  const services: DesktopIpcServices = {
+    ...(approvalWork === null ? {} : { approvalWork: {
+      list: async () => approvalWork.list((await resolveSelectedWorkspace(workspaceService, settingsRepository))?.id ?? null),
+      prepareFromRegistry: async (primaryWorkId: string) => approvalWork.prepareFromRegistry(primaryWorkId, await approvalWorkspace()),
+      startReviewed: async (reviewToken: string) => approvalWork.startReviewed(reviewToken, await approvalWorkspace()),
+      resume: async (primaryWorkId: string) => approvalWork.resume(primaryWorkId, await approvalWorkspace()),
+      deactivate: async (primaryWorkId: string) => approvalWork.deactivate(primaryWorkId, await approvalWorkspace()),
+    } }),
+    listWorkspaces: async (): Promise<readonly WorkspaceSummary[]> => {
+      return (await workspaceRepository.listAll())
+        .filter((workspace) => !isGeneratedAutoMachineRoot(workspace))
+        .map(toWorkspaceSummary);
+    },
+    addWorkspace: async (request: AddWorkspaceRequest): Promise<WorkspaceSummary> => {
+      const requestedRoot = comparableHostPath(request.rootPath, process.platform);
+      if (requestedRoot === null) throw new Error('Workspace root uses a foreign host path syntax');
+      const existing = (await workspaceRepository.listAll()).find((entry) => comparableHostPath(entry.rootPath, process.platform) === requestedRoot);
+      if (existing !== undefined) {
+        if (existing.archivedAt !== undefined && existing.archivedAt !== null) await assertWorkspaceRelinkable(existing);
+        if (existing.archivedAt !== undefined && existing.archivedAt !== null) await workspaceRepository.restore(existing.id);
+        settingsRepository.set(selectedWorkspaceSettingKey, existing.id);
+        await activateWorkspace(existing.id);
+        if (!mcpLifecycle.status().running) await mcpLifecycle.start();
+        const restored = await workspaceRepository.getAny(existing.id);
+        if (restored === null) throw new Error('Workspace could not be restored');
+        return toWorkspaceSummary(restored);
+      }
+      const displayName = path.basename(path.resolve(request.rootPath)) || 'Workspace';
+      const workspace = unwrap(await workspaceService.add(displayName, request.rootPath), 'Workspace could not be added');
+      settingsRepository.set(selectedWorkspaceSettingKey, workspace.id);
+      await activateWorkspace(workspace.id);
+      if (!mcpLifecycle.status().running) {
+        await mcpLifecycle.start();
+      }
+      return toWorkspaceSummary(workspace);
+    },
+    selectWorkspace: async (request: SelectWorkspaceRequest): Promise<WorkspaceSummary> => {
+      return selectWorkspaceOnly(request.workspaceId);
+    },
+    setWorkspaceActive: async (request): Promise<{ readonly workspace: WorkspaceSummary; readonly active: boolean }> => {
+      if (request.active) await activateWorkspace(request.workspaceId);
+      else await deactivateWorkspace(request.workspaceId);
+      const workspace = await resolveManageableWorkspace(request.workspaceId);
+      return { workspace: toWorkspaceSummary(workspace), active: request.active };
+    },
+    setWorkspaceArchived: async (request: SetWorkspaceArchivedRequest): Promise<WorkspaceSummary> => {
+      const workspace = await resolveManageableWorkspace(request.workspaceId);
+      if (request.archived) {
+        if (workspace.archivedAt !== undefined && workspace.archivedAt !== null) return toWorkspaceSummary(workspace);
+        await assertWorkspaceIdle(workspace.id);
+        await workspaceIndex.stopWatch(workspace.id);
+        await workspaceRepository.archive(workspace.id);
+        await repairSelectedWorkspace(workspace.id);
+      } else if (workspace.archivedAt !== undefined && workspace.archivedAt !== null) {
+        await assertWorkspaceRelinkable(workspace);
+        await workspaceRepository.restore(workspace.id);
+      }
+      const updated = await workspaceRepository.getAny(workspace.id);
+      if (updated === null) throw new Error('Workspace was not found');
+      return toWorkspaceSummary(updated);
+    },
+    deleteWorkspace: async (request: DeleteWorkspaceRequest): Promise<{ readonly deleted: boolean; readonly workspaceId: string; readonly rootPath: string; readonly backupId: string }> => {
+      if (request.userConfirmed !== true) throw new Error('Deleting a workspace registration requires explicit confirmation');
+      const workspace = await resolveManageableWorkspace(request.workspaceId);
+      await assertWorkspaceIdle(workspace.id);
+      await requireNativeAdministrativeApproval({
+        toolName: 'workspace_registration_delete',
+        mutationKind: 'delete',
+        reason: 'Deleting a persisted workspace registration changes application database state',
+        summary: `Delete workspace registration "${workspace.displayName}" (${workspace.id}). The project folder at ${workspace.realRootPath} will not be deleted. A SQLite backup will be created before the registration is removed.`,
+        workspaceId: workspace.id,
+        workspaceRoot: workspace.realRootPath,
+      });
+      const backup = await backupService.create('manual');
+      await workspaceRepository.delete(workspace.id);
+      try {
+        await workspaceIndex.forgetWorkspace(workspace.id);
+      } catch (error: unknown) {
+        await repairSelectedWorkspace(workspace.id);
+        throw new Error('The workspace registration was removed, but its index cleanup failed. Reload the workspace list before retrying cleanup.', { cause: error });
+      }
+      await repairSelectedWorkspace(workspace.id);
+      return { deleted: true, workspaceId: workspace.id, rootPath: workspace.realRootPath, backupId: backup.id };
+    },
+    getDashboard: async (): Promise<DashboardSnapshot> => {
+      await sweepRecoveryRetention().catch((error: unknown) => {
+        console.error(`Recovery retention sweep failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+      });
+      const selectedWorkspace = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      const activeWorkspaces = await resolveActiveProjectWorkspaces();
+      const selectedWorkspaceId = selectedWorkspace?.id ?? null;
+      if (gitSummaryWorkspaceId !== selectedWorkspaceId) {
+        gitSummaryWorkspaceId = selectedWorkspaceId;
+        gitSummaryCache.clear();
+      }
+      const gitSummary = selectedWorkspace === null
+        ? { branch: null, changedFiles: 0, stagedFiles: 0, message: 'No workspace selected' }
+        : await gitSummaryCache.get(() => buildGitSummary(selectedWorkspace, gitService, actor));
+      const codexToolsEnabled = readSettings().codexToolsEnabled;
+      const codex = codexToolsEnabled
+        ? await codexSummaryCache.get(() => buildCodexSummary(codexDiscovery))
+        : { installed: await codexPresenceCache.get(async () => (await executableResolver.resolve('codex')).ok), version: null };
+      const recentAuditEvents = await buildAuditSummary(auditRepository, settingsRepository);
+      const processSummaries = await listTrackedProcesses(processService, trackedProcesses);
+      const capabilities = await capabilitySummaryCache.get(() => buildCapabilitySummary(capabilityRuntime.health));
+      const mcp = mcpLifecycle.status();
+      const workLog = await buildWorkLog(auditRepository, workLogViewState);
+      const workLogSessions = await activitySessionCatalog.list();
+      const inFlight = activityTracker.listInFlight().map((entry) => toInFlightItem(entry, logSessionId));
+      const tunnel = await observedTunnelStatus();
+      const remoteMcp = await remoteMcpController.status();
+      const backups = await backupService.list();
+      let recovery: DashboardSnapshot['recovery'];
+      if (selectedWorkspace === null) {
+        recovery = { trashRoot: recoveryTrashRoot, trashItems: [], checkpoints: [] };
+      } else {
+        const trash = unwrap(await fileService.listRecoveryItems(selectedWorkspace.id), 'Recovery Trash could not be listed');
+        recovery = {
+          trashRoot: trash.recoveryTrashRoot,
+          trashItems: trash.items,
+          checkpoints: unwrap(await checkpointService.list(selectedWorkspace.id), 'Checkpoints could not be listed'),
+        };
+      }
+      const engineeringHarnessStatus = await buildEngineeringHarnessStatus(selectedWorkspace);
+      logHub.syncWorkLog(workLog, inFlight.map((item) => ({ callId: item.callId, toolName: item.toolName, targetSummary: item.targetSummary, targetDetail: item.targetDetail, startedAt: item.startedAt, workspaceId: item.workspaceId, sessionId: item.sessionId })));
+      logHub.syncProcesses(processSummaries.map((summary) => ({
+        id: summary.id,
+        workspaceId: summary.workspaceId,
+        sessionId: summary.sessionId,
+        executable: summary.executable,
+        args: summary.args,
+        state: summary.state,
+        logSummary: summary.logSummary,
+      })));
+      return {
+        selectedWorkspace: selectedWorkspace === null ? null : toWorkspaceSummary(selectedWorkspace),
+        activeWorkspaces: activeWorkspaces.map(toWorkspaceSummary),
+        gitSummary,
+        mcp,
+        codex,
+        managedProcessCount: processSummaries.length,
+        auditEventCount: recentAuditEvents.length,
+        recentAuditEvents,
+        permissionProfile: profileName,
+        capabilities,
+        agentState: deriveAgentState(mcp.running, inFlight.length),
+        mode: 'WORK',
+        locale: readLocale(settingsRepository),
+        unrestricted,
+        allowAiDelete: allowAiDeleteProvider(),
+        destructiveDeletePolicy: destructivePolicyProvider(),
+        stdioPermissionProfile: parseStdioPermissionProfile(settingsRepository.get(STDIO_PERMISSION_PROFILE_SETTING_KEY), 'full'),
+        stdioStrictRoots: parseBooleanSetting(settingsRepository.get(STDIO_STRICT_ROOTS_SETTING_KEY), false),
+        stdioAllowedRoots: parseAllowedRoots(settingsRepository.get(STDIO_ALLOWED_ROOTS_SETTING_KEY)),
+        backups: backups.map(toIpcBackupSummary),
+        restoreNotice: toIpcBackupRestoreNotice(parseBackupRestoreNotice(settingsRepository.get(BACKUP_RESTORE_NOTICE_SETTING_KEY))),
+        recovery,
+        connectionModes: buildConnectionModes({
+          httpUrl: mcp.url,
+          ...(selectedWorkspace === null ? {} : { workspaceRoot: selectedWorkspace.realRootPath }),
+          profile: parseStdioPermissionProfile(settingsRepository.get(STDIO_PERMISSION_PROFILE_SETTING_KEY), 'full'),
+          strictRoots: parseBooleanSetting(settingsRepository.get(STDIO_STRICT_ROOTS_SETTING_KEY), false),
+          allowedRoots: parseAllowedRoots(settingsRepository.get(STDIO_ALLOWED_ROOTS_SETTING_KEY)),
+          fullBypassAll: readSettings().stdioFullBypassAll,
+        }),
+        workLog,
+        workLogSessions,
+        inFlight,
+        tunnel,
+        remoteMcp,
+        settings: readSettings(),
+        engineeringHarnessStatus,
+        hostPlatform: supportedHostPlatform(process.platform),
+        hostArch: supportedHostArchitecture(process.arch),
+        appVersion: APP_VERSION,
+      };
+    },
+    setPermissionProfile: async (request: SetPermissionProfileRequest): Promise<{ readonly profile: IpcPermissionProfileName }> => {
+      profileName = request.profile;
+      settingsRepository.set(permissionSettingKey, profileName);
+      if (profileName !== 'full') settingsRepository.set(USER_SETTING_KEYS.desktopFullBypassAll, 'false');
+      return { profile: profileName };
+    },
+    setUnrestrictedMode: async (request: SetUnrestrictedModeRequest): Promise<{ readonly unrestricted: boolean; readonly restartRequired: boolean }> => {
+      settingsRepository.set(UNRESTRICTED_SETTING_KEY, request.enabled ? 'true' : 'false');
+      const applied = isUnrestricted(process.env, settingsRepository.get(UNRESTRICTED_SETTING_KEY));
+      return { unrestricted: applied, restartRequired: applied !== unrestricted };
+    },
+    setAiDeletePolicy: async (request: SetAiDeletePolicyRequest): Promise<{ readonly enabled: boolean; readonly policy: DestructiveAutoApprovalPolicy }> => {
+      const current = destructivePolicyProvider();
+      const policy = request.policy ?? { ...current, approvals: { ...current.approvals, delete_file: request.enabled ?? current.approvals.delete_file } };
+      settingsRepository.set(DESTRUCTIVE_AUTO_APPROVAL_SETTING_KEY, serializeDestructiveAutoApprovalPolicy(policy));
+      settingsRepository.set(ALLOW_AI_DELETE_SETTING_KEY, policy.approvals.delete_file ? 'true' : 'false');
+      return { enabled: policy.approvals.delete_file, policy: destructivePolicyProvider() };
+    },
+    setStdioPolicy: async (request: SetStdioPolicyRequest): Promise<{ readonly profile: IpcPermissionProfileName; readonly strictRoots: boolean; readonly allowedRoots: readonly string[]; readonly restartRequired: boolean }> => {
+      const allowedRoots = parseAllowedRoots(request.allowedRoots.join(';'));
+      if (request.strictRoots && allowedRoots.length === 0) throw new Error('Strict root mode requires at least one allowed root');
+      settingsRepository.set(STDIO_PERMISSION_PROFILE_SETTING_KEY, request.profile);
+      if (request.profile !== 'full') settingsRepository.set(USER_SETTING_KEYS.stdioFullBypassAll, 'false');
+      settingsRepository.set(STDIO_STRICT_ROOTS_SETTING_KEY, request.strictRoots ? 'true' : 'false');
+      settingsRepository.set(STDIO_ALLOWED_ROOTS_SETTING_KEY, serializeAllowedRoots(allowedRoots));
+      return { profile: request.profile, strictRoots: request.strictRoots, allowedRoots, restartRequired: true };
+    },
+    createBackup: async (): Promise<IpcBackupSummary> => toIpcBackupSummary(await backupService.create('manual')),
+    purgeRecoveryData: async (request: PurgeRecoveryDataRequest): Promise<{ readonly category: PurgeRecoveryDataRequest['category']; readonly deleted: number }> => {
+      if (request.userConfirmed !== true) throw new Error('Deleting recovery data requires explicit confirmation');
+      if (request.category === 'trash') return { category: request.category, deleted: await fileService.purgeAllRecoveryItems() };
+      if (request.category === 'checkpoints') return { category: request.category, deleted: await checkpointRepository.deleteAll() };
+      await startupBackup;
+      return { category: request.category, deleted: await backupService.purgeAll() };
+    },
+    scheduleRestoreBackup: async (request: ScheduleRestoreBackupRequest): Promise<{ readonly scheduled: boolean; readonly restartRequired: boolean }> => {
+      const tunnelStatus = await tunnelController.status();
+      if (tunnelStatus.state === 'running') throw new Error('Stop Secure MCP Tunnel before scheduling a database restore');
+      if (mcpLifecycle.status().running) throw new Error('Stop local MCP before scheduling a database restore');
+      await requireNativeAdministrativeApproval({
+        toolName: 'database_restore',
+        mutationKind: 'replace',
+        reason: 'Scheduling a database restore will replace persisted application database state on the next restart',
+        summary: `Schedule application database restore from backup ${request.backupId}. The restore runtime will create an emergency SQLite pre-image before replacing the active database.`,
+      });
+      await backupService.scheduleRestore(request.backupId);
+      return { scheduled: true, restartRequired: true };
+    },
+    restoreRecoveryItem: async (request: RestoreRecoveryItemRequest): Promise<{ readonly restored: boolean; readonly path: string; readonly rollbackRecoveryId: string | null }> => {
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null || selected.id !== request.workspaceId) throw new Error('Recovery target must match the selected workspace');
+      const restored = unwrap(await fileService.restoreDeletedFile(actor, selected.id, {
+        recoveryId: request.recoveryId,
+        userConfirmed: true,
+      }), 'Recovery item could not be restored');
+      return { restored: true, path: restored.path, rollbackRecoveryId: restored.rollbackRecoveryId ?? null };
+    },
+    restoreCheckpoint: async (request: RestoreCheckpointRequest): Promise<{ readonly restored: boolean; readonly paths: readonly string[]; readonly rollbackCheckpointId: string | null }> => {
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null || selected.id !== request.workspaceId) throw new Error('Checkpoint target must match the selected workspace');
+      const restored = unwrap(await checkpointService.restore(actor, selected.id, request.checkpointId, { userConfirmed: true }), 'Checkpoint could not be restored');
+      return { restored: true, paths: restored.restoredPaths, rollbackCheckpointId: restored.rollbackCheckpointId ?? null };
+    },
+    listProcesses: async (): Promise<readonly ProcessSummary[]> => listTrackedProcesses(processService, trackedProcesses),
+    startProcess: async (request: StartProcessRequest): Promise<ProcessSummary> => {
+      if (request.mode === 'fixture' && process.env.LNWJUD_E2E_FIXTURE !== '1') {
+        throw new Error('Fixture process is only available in the desktop test harness');
+      }
+      const started = request.mode === 'fixture'
+        ? await processService.start(actor, request.workspaceId, {
+          executable: fixtureNodeExecutable(),
+          args: ['-e', "process.stdout.write('fixture-ready\\n'); setTimeout(() => {}, 30000);"],
+          timeoutMs: 60_000,
+          userConfirmed: true,
+        })
+        : await processService.startProjectCommand(actor, request.workspaceId, 'dev', undefined, true);
+      const processValue = unwrap(started, 'Process could not be started');
+      trackedProcesses.set(processValue.processId, request.workspaceId);
+      return toProcessSummary(processValue, request.workspaceId, '');
+    },
+    stopProcess: async (request: StopProcessRequest): Promise<{ readonly stopped: boolean }> => {
+      const workspaceId = trackedProcesses.get(request.processId);
+      if (workspaceId === undefined) return { stopped: false };
+      unwrap(await processService.stop(actor, workspaceId, request.processId, true), 'Process could not be stopped');
+      return { stopped: true };
+    },
+    startMcp: async (request: StartMcpRequest): Promise<McpConnectionStatus> => {
+      await resolveWorkspaceOrThrow(request.workspaceId);
+      return mcpLifecycle.start();
+    },
+    stopMcp: (): Promise<McpConnectionStatus> => mcpLifecycle.stop(),
+    restartMcp: (): Promise<McpConnectionStatus> => mcpLifecycle.restart(),
+    clearWorkLog: async (request: ClearWorkLogRequest = {}): Promise<{ readonly cleared: boolean }> => {
+      workLogViewState.clear(request);
+      return { cleared: true };
+    },
+    saveTunnelApiKey: async (request: SaveTunnelApiKeyRequest): Promise<{ readonly saved: boolean }> => {
+      await tunnelController.saveApiKey(request.apiKey);
+      if (readSettings().tunnelAutoReconnect) {
+        const status = await tunnelController.status();
+        if (status.profileExists && status.clientPath !== null) await tunnelController.startAutomatically();
+      }
+      return { saved: true };
+    },
+    startTunnel: async (): Promise<TunnelStatus> => {
+      const status = await tunnelController.start();
+      recordPersistentTunnelStatus(status);
+      return status;
+    },
+    stopTunnel: async (): Promise<TunnelStatus> => {
+      const status = await tunnelController.stop();
+      recordPersistentTunnelStatus(status);
+      return status;
+    },
+    getTunnelStatus: (): Promise<TunnelStatus> => observedTunnelStatus(),
+    beginTunnelOAuthLogin: (): Promise<TunnelOAuthLoginStatus> => oauthLoginManager.begin(),
+    getTunnelOAuthLoginStatus: async (): Promise<TunnelOAuthLoginStatus> => oauthLoginManager.status(),
+    cancelTunnelOAuthLogin: async (): Promise<TunnelOAuthLoginStatus> => {
+      oauthLoginManager.cancel();
+      return oauthLoginManager.status();
+    },
+    switchTunnelAuthToLegacy: async (): Promise<TunnelStatus> => {
+      await tunnelAuthCoordinator.switchToLegacy();
+      await reconcileTunnelAfterAuthModeChange();
+      return observedTunnelStatus();
+    },
+    logoutTunnelOAuth: async (): Promise<TunnelStatus> => {
+      await tunnelAuthCoordinator.logoutOAuth();
+      await reconcileTunnelAfterAuthModeChange();
+      return observedTunnelStatus();
+    },
+    getRemoteMcpStatus: () => remoteMcpController.status(),
+    installRemoteMcpProvider: async () => { const status = await withNgrokInstallIfNeeded(() => remoteMcpController.installProvider()); logHub.feed('mcp', 'info', `[REMOTE MCP] ngrok provider: ${status.message ?? status.state}`); return status; },
+    saveRemoteMcpAuthtoken: async (request) => { const status = await remoteMcpController.saveAuthtoken(request.authtoken); logHub.feed('mcp', 'info', '[REMOTE MCP] ngrok authtoken stored with the host secure-storage provider'); return status; },
+    setRemoteMcpPublicOrigin: async (request) => { const status = await remoteMcpController.savePublicOrigin(request.publicOrigin); logHub.feed('mcp', 'info', `[REMOTE MCP] public origin ${status.configuredPublicOrigin === null ? 'cleared' : 'configured'} for ${status.transport}`); return status; },
+    setRemoteMcpTransport: async (request) => { const status = await remoteMcpController.setTransport(request.transport); logHub.feed('mcp', 'info', `[REMOTE MCP] transport selected: ${status.transport}`); return status; },
+    startRemoteMcp: async () => { const status = await withNgrokInstallIfNeeded(() => remoteMcpController.start()); logHub.feed('mcp', 'info', `[REMOTE MCP] ${status.transport} online ${status.publicMcpUrl ?? ''}`.trim()); return status; },
+    stopRemoteMcp: async () => { const status = await remoteMcpController.stop(); logHub.feed('mcp', 'info', '[REMOTE MCP] stopped'); return status; },
+    resetRemoteMcpOAuth: async () => { const status = await remoteMcpController.resetOAuthTrust(); logHub.feed('mcp', 'info', '[REMOTE MCP] OAuth authorization reset'); return status; },
+    setTunnelClientPath: async (request: SetTunnelClientPathRequest): Promise<{ readonly clientPath: string }> => {
+      const clientPath = await tunnelController.replaceClientPath(request.clientPath);
+      if (readSettings().tunnelAutoReconnect) {
+        const status = await tunnelController.status();
+        if (status.profileExists && (status.runtimeCredentialAvailable ?? status.authReady ?? status.hasApiKey)) await tunnelController.startAutomatically();
+      }
+      return { clientPath };
+    },
+    setLocale: async (request: SetLocaleRequest): Promise<{ readonly locale: UiLocale }> => {
+      settingsRepository.set(localeSettingKey, request.locale);
+      return { locale: request.locale };
+    },
+    setUserSettings: async (request: SetUserSettingsRequest): Promise<{ readonly settings: UserSettings; readonly restartRequired: boolean }> => {
+      const previous = readSettings();
+      const stdioProfile = parseStdioPermissionProfile(settingsRepository.get(STDIO_PERMISSION_PROFILE_SETTING_KEY), 'full');
+      const normalizedSettings: UserSettings = {
+        ...request.settings,
+        desktopFullBypassAll: profileName === 'full' && request.settings.desktopFullBypassAll,
+        stdioFullBypassAll: stdioProfile === 'full' && request.settings.stdioFullBypassAll,
+      };
+      persistUserSettings(settingsRepository, normalizedSettings);
+      const next = readSettings();
+      if (previous.codexToolsEnabled !== next.codexToolsEnabled) toolAvailabilityService.notifyEligibilityChanged();
+      const reconciledMcp = await extensionsService.listMcpServers().catch(() => undefined);
+      if (reconciledMcp?.ok) {
+        const unverified = reconciledMcp.value.servers.filter((server) => server.lifecycle === 'termination_unverified');
+        if (unverified.length > 0) logHub.feed('mcp', 'warn', `[MCP] termination_unverified: ${unverified.map((server) => server.name).join(', ')}`);
+      }
+      if (previous.recoveryRetentionDays !== next.recoveryRetentionDays) {
+        lastRecoveryRetentionSweepAt = 0;
+        await sweepRecoveryRetention(true).catch((error: unknown) => {
+          console.error(`Recovery retention sweep failed: ${error instanceof Error ? error.message : 'unknown error'}`);
+        });
+      }
+      return { settings: next, restartRequired: runtimeRestartRequired(previous, next) };
+    },
+    getPonytailPolicyContext: async (request): Promise<PonytailPolicyContext> => buildPonytailPolicyContext(request.workspaceId),
+    setWorkspacePonytailMode: async (request: SetWorkspacePonytailModeRequest): Promise<PonytailPolicyContext> => {
+      await writeWorkspacePonytailMode(request.workspaceId, request.mode);
+      return buildPonytailPolicyContext(request.workspaceId);
+    },
+    setGoalPonytailMode: async (request: SetGoalPonytailModeRequest): Promise<PonytailPolicyContext> => {
+      const goal = await goalRepository.getById(request.goalId);
+      if (goal === null || goal.workspaceId !== request.workspaceId) throw new Error('Goal does not belong to the selected workspace');
+      await goalRepository.setIdleGoalPonytailModeForHost({
+        goalId: request.goalId,
+        expectedRevision: request.expectedRevision,
+        ponytailMode: request.mode === 'inherit' ? null : request.mode,
+        now: new Date().toISOString(),
+      });
+      return buildPonytailPolicyContext(request.workspaceId);
+    },
+    configureTunnelProfile: async (request: ConfigureTunnelProfileRequest): Promise<{ readonly configured: boolean; readonly profilePath: string }> => {
+      const rawDesiredState = settingsRepository.get(tunnelRuntimeDesiredStateSettingKey);
+      const currentDesiredState = rawDesiredState === 'running' || rawDesiredState === 'stopped' ? rawDesiredState : null;
+      const hadExistingProfile = existsSync(tunnelController.profilePath());
+      const runtimePolicy = configuredTunnelRuntimePolicy(readSettings().tunnelAutoReconnect, currentDesiredState, hadExistingProfile);
+
+      // An explicit Stop is authoritative. Reconcile it before profile init can
+      // replace the stored Tunnel ID, otherwise an old surviving runtime may no
+      // longer be safely attributable to the profile that owns it.
+      if (currentDesiredState === 'stopped') await applyConfiguredTunnelRuntimePolicy(tunnelController, runtimePolicy);
+
+      const profilePath = await tunnelController.configureProfile(request.tunnelId);
+      if (currentDesiredState === null) settingsRepository.set(tunnelRuntimeDesiredStateSettingKey, runtimePolicy.desiredState);
+
+      // Fresh installs initialize to stopped and are reconciled only after the
+      // profile exists; legacy profiles with no saved desired state preserve the
+      // historical running intent and auto-start only when auto reconnect is on.
+      if (currentDesiredState !== 'stopped') await applyConfiguredTunnelRuntimePolicy(tunnelController, runtimePolicy);
+      return { configured: true, profilePath };
+    },
+    launchManagedBrowser: async (): Promise<ManagedBrowserStatus> => {
+      const result = await capabilityRuntime.domCdp.ensureStarted();
+      return toManagedBrowserStatus(unwrap(result, 'Managed Chrome could not be started'));
+    },
+    installPdfProvider: async (): Promise<PdfProviderInstallResult> => {
+      const pdfTarget = runtimeDependencies.pdfProvider;
+      if (process.platform !== pdfTarget.platform || process.arch !== pdfTarget.arch) {
+        throw new Error(`The bundled PDF provider installer supports only ${pdfTarget.platform}/${pdfTarget.arch}; configure a native pdftotext provider on this host.`);
+      }
+      const installed = await withInstallActivity('pdf_provider', 'Installing PDF Provider…', () => (options.pdfProviderInstaller ?? installPdfProvider)(dataPath));
+      const previous = readSettings();
+      settingsRepository.set(USER_SETTING_KEYS.pdfProviderPath, installed.providerPath);
+      const next = readSettings();
+      return { ...installed, restartRequired: runtimeRestartRequired(previous, next) };
+    },
+    runDoctor: async (): Promise<DoctorReport> => buildFullDoctorReport(readLocale(settingsRepository)),
+    listWorkflowTemplates: async (request: { workspaceId: string }): Promise<readonly WorkflowTemplate[]> =>
+      unwrap(await new WorkflowTemplateService(workspaceRepository).list(actor, request.workspaceId), 'Workflow catalogue unavailable'),
+    prepareWorkflow: async (request: WorkflowPrepareRequest): Promise<WorkflowDraft> =>
+      unwrap(await new WorkflowTemplateService(workspaceRepository).prepare(actor, request), 'Workflow preparation failed'),
+    getCallHistory: async (request: CallHistoryRequest): Promise<CallHistoryPage> =>
+      unwrap(await new CallHistoryService(workspaceRepository, auditRepository).history(actor, request), 'Call history unavailable'),
+    getDoctorGoals: async (request: { readonly workspaceId: string; readonly view?: 'calls' | 'results' }): Promise<readonly DoctorGoalOption[]> => {
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null || selected.id !== request.workspaceId) throw new Error('Doctor Goal filter requires the selected workspace');
+      const goals = await goalRepository.listWorkspaceGoalFilters(request.workspaceId);
+      if (request.view !== undefined && request.view !== 'calls' && request.view !== 'results') throw new Error('Invalid Doctor Goal view');
+      const calls = request.view === 'calls'
+        ? await auditRepository.listWorkspaceGoalIdsWithEvidence(request.workspaceId, 'calls') : null;
+      const receipts = request.view === 'results'
+        ? await auditRepository.listWorkspaceGoalIdsWithEvidence(request.workspaceId, 'receipts') : null;
+      const selectedGoals: typeof goals[number][] = [];
+      for (const goal of goals) {
+        if (calls !== null && !calls.has(goal.id)) continue;
+        if (receipts !== null && !receipts.has(goal.id)) {
+          const record = await goalRepository.getById(goal.id);
+          if (!record || !hasInspectableGoalResults(record)) continue;
+        }
+        selectedGoals.push(goal);
+      }
+      return selectedGoals.map((goal) => ({ goalId: goal.id, goalKey: goal.goalKey, objective: goal.objective, status: goal.status, updatedAt: goal.updatedAt }));
+    },
+    getTaskResult: async (request: { workspaceId: string; goalId: string }): Promise<TaskResultSummary> =>
+      unwrap(await new TaskResultService(goalService, auditRepository, workspaceRepository, goalRepository).get(actor, request.workspaceId, request.goalId), 'Goal result unavailable'),
+    restoreTaskCheckpoint: async (request: RestoreTaskCheckpointRequest): Promise<RestoreTaskCheckpointResult> => {
+      if (request.userConfirmed !== true) throw new Error('Checkpoint restore requires explicit confirmation');
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null || selected.id !== request.workspaceId) throw new Error('Restore target must be the selected workspace');
+      const goal = await goalRepository.getById(request.goalId);
+      if (goal === null || goal.workspaceId !== selected.id || goal.revision !== request.goalRevision) {
+        throw new Error('Goal ownership or revision is stale');
+      }
+      const checkpoint = await checkpointRepository.get(request.checkpointId);
+      if (checkpoint === null || checkpoint.workspaceId !== selected.id
+          || checkpoint.files.length === 0 || checkpoint.files.length > 20) {
+        throw new Error('Checkpoint is missing or outside the selected workspace');
+      }
+      const receipts = await auditRepository.listGoalMutationReceipts(selected.id, request.goalId, 200);
+      const related = receipts.filter((item) => item.checkpointId === request.checkpointId);
+      const expectedPaths = Object.keys(request.expectedCurrentHashes);
+      if (checkpoint.files.length !== expectedPaths.length
+          || !checkpoint.files.every((item) => related.some((receipt) => receipt.path === item.path)
+            && /^[a-f0-9]{64}$/i.test(request.expectedCurrentHashes[item.path] ?? ''))) {
+        throw new Error('Checkpoint has no verified Goal relationship or full current-hash coverage');
+      }
+      await requireNativeAdministrativeApproval({
+        toolName: 'restore_task_checkpoint',
+        mutationKind: 'replace',
+        reason: 'Restore the exact Goal-related file checkpoint after user confirmation and hash comparison',
+        summary: `Restore ${checkpoint.files.length} files in selected workspace ${selected.id} from checkpoint ${request.checkpointId}. A rollback checkpoint will be recorded.`,
+        workspaceId: selected.id,
+        workspaceRoot: selected.realRootPath,
+      });
+      const current = await goalRepository.getById(request.goalId);
+      if (current === null || current.workspaceId !== selected.id || current.revision !== request.goalRevision) {
+        throw new Error('Goal revision changed during confirmation; refresh and review again');
+      }
+      const restored = unwrap(await checkpointService.restore(actor, selected.id, request.checkpointId,
+        { expectedCurrentHashes: request.expectedCurrentHashes, userConfirmed: true }), 'Goal checkpoint restore was denied');
+      return { restored: true, paths: restored.restoredPaths, rollbackCheckpointId: restored.rollbackCheckpointId ?? null };
+    },
+    cancelOwnedGoalTask: async (request: CancelOwnedGoalTaskRequest): Promise<CancelOwnedGoalTaskResult> => {
+      if (request.userConfirmed !== true) throw new Error('Cancellation requires explicit confirmation');
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null || selected.id !== request.workspaceId) throw new Error('Task cancellation must match selected workspace');
+      const goal = await goalRepository.getById(request.goalId);
+      if (goal === null || goal.workspaceId !== selected.id) throw new Error('Goal does not belong to selected workspace');
+      const task = (goal.trackedTasks ?? []).find((row) => row.taskId === request.taskId && row.provider === request.provider);
+      if (!task || !task.cancelWithGoal || task.role !== 'blocking_job') {
+        throw new Error('Task is not an eligible Goal-owned blocking job');
+      }
+      await requireNativeAdministrativeApproval({
+        toolName: 'cancel_owned_goal_task',
+        mutationKind: 'execute',
+        reason: 'Stop one exact tracked blocking job; shared or unknown tasks must remain running',
+        summary: `Cancel task ${request.taskId} through its bound ${request.provider} provider in workspace ${selected.id}.`,
+        workspaceId: selected.id,
+        workspaceRoot: selected.realRootPath,
+      });
+      const fresh = await goalRepository.getById(request.goalId);
+      if (fresh === null || fresh.workspaceId !== selected.id || !(fresh.trackedTasks ?? []).some(
+        (row) => row.taskId === task.taskId && row.provider === task.provider && row.cancelWithGoal && row.role === 'blocking_job',
+      )) throw new Error('Task ownership changed during confirmation');
+      const [outcome] = await taskCancellation.cancelForGoal(fresh.ownerClientId, selected.id, [task]);
+      if (!outcome) throw new Error('Task cancellation produced no provider observation');
+      return {
+        taskId: outcome.taskId, status: outcome.status,
+        ...(outcome.error === undefined ? {} : { error: outcome.error }),
+      };
+    },
+    getResourceSnapshot: async (request: ResourceSnapshotRequest): Promise<ResourceSnapshot> => {
+      const resourceSnapshot = unwrap(await new ResourceSnapshotService(workspaceRepository, goalService, {
+        contextScope: 'transport',
+        getContextStats: async (): Promise<Partial<ResourceSnapshot['context']>> => {
+          const counters = desktopContextEconomy.snapshot();
+          return {
+            rawContextBytes: counters.rawContextBytes,
+            contextSentBytes: counters.contextSentBytes,
+            previouslySeenBytesAvoided: counters.previouslySeenBytesAvoided,
+            ledgerHits: counters.ledgerHits,
+          };
+        },
+        getOwnedTask: async (workspaceId, goalId, taskId, provider): Promise<{ ownerVerified: boolean; observedAt: string; workingSetBytes?: number; cpuPercent?: number } | null> => {
+          const goal = await goalRepository.getById(goalId);
+          if (!goal || goal.workspaceId !== workspaceId) return null;
+          if (!goal.trackedTasks?.some(task => task.taskId === taskId && task.provider === provider)) return null;
+          const client = goal.ownerClientId;
+          let ownerVerified = false;
+          let status;
+          if (provider === 'process') {
+            ownerVerified = processService.isOwnedGoalTask(client, workspaceId, taskId);
+            status = processService.statusForGoalLiveness(workspaceId, taskId);
+          } else if (provider === 'codex') {
+            ownerVerified = codexService.isOwnedGoalTask(client, workspaceId, taskId);
+            status = codexService.statusForGoalLiveness(workspaceId, taskId);
+          } else if (provider === 'shell') {
+            ownerVerified = await capabilityRuntime.shell.isOwnedGoalTask(client, workspaceId, taskId);
+            status = await capabilityRuntime.shell.statusForGoalLiveness(workspaceId, taskId);
+          } else return null;
+          const detail = status.ok && status.value !== null && typeof status.value === 'object'
+            ? status.value as Record<string, unknown> : null;
+          const state = detail?.state;
+          const runningOwned = ownerVerified && (state === 'running' || state === 'starting');
+          const pid = provider === 'shell' ? detail?.child_pid : detail?.pid;
+          const launchedAt = provider === 'shell' ? (detail?.child_started_at ?? detail?.started_at) : detail?.startedAt;
+          const metrics = runningOwned && typeof pid === 'number' && typeof launchedAt === 'string'
+            ? await sampleOwnedProcessMetrics(pid, launchedAt) : null;
+          return {
+            ownerVerified: runningOwned,
+            observedAt: new Date().toISOString(),
+            ...(metrics === null ? {} : { workingSetBytes: metrics.workingSetBytes,
+              ...(metrics.cpuPercent === null ? {} : { cpuPercent: metrics.cpuPercent }) }),
+          };
+        },
+      }, undefined, goalRepository).get(actor, request), 'Resource snapshot unavailable');
+      // This host-wide baseline remains measurable even when no Goal has an
+      // active, individually attributable OS process. Never label it as Goal usage.
+      const cpu = process.cpuUsage();
+      const upSeconds = process.uptime();
+      const logicalCpus = os.availableParallelism();
+      const avg = upSeconds >= 1 && logicalCpus > 0
+        ? Number(((cpu.user + cpu.system) / 1_000_000 / upSeconds / logicalCpus * 100).toFixed(1))
+        : null;
+      return { ...resourceSnapshot, desktopMain: {
+        rssBytes: process.memoryUsage().rss,
+        cpuAveragePercent: avg,
+      } };
+    },
+    getToolCatalog: async (request: GetToolCatalogRequest): Promise<ToolCatalogSnapshot> => toolCatalogService.getSnapshot(request.locale),
+    recheckToolCatalog: recheckCatalogAndDoctor,
+    setToolAvailability: async (request: SetToolAvailabilityRequest): Promise<SetToolAvailabilityResult> => mutateToolAvailability(request, request.enabled),
+    resetToolAvailability: async (request: ResetToolAvailabilityRequest): Promise<SetToolAvailabilityResult> => mutateToolAvailability(request, null),
+    getLogSnapshot: async (): Promise<LogSnapshot> => {
+      const workLog = await buildWorkLog(auditRepository, workLogViewState);
+      const inFlight = activityTracker.listInFlight().map((entry) => toInFlightItem(entry, logSessionId));
+      const processSummaries = await listTrackedProcesses(processService, trackedProcesses);
+      logHub.syncWorkLog(workLog, inFlight.map((item) => ({ callId: item.callId, toolName: item.toolName, targetSummary: item.targetSummary, targetDetail: item.targetDetail, startedAt: item.startedAt, workspaceId: item.workspaceId, sessionId: item.sessionId })));
+      logHub.syncProcesses(processSummaries.map((summary) => ({
+        id: summary.id,
+        workspaceId: summary.workspaceId,
+        sessionId: summary.sessionId,
+        executable: summary.executable,
+        args: summary.args,
+        state: summary.state,
+        logSummary: summary.logSummary,
+      })));
+      const snapshot = logHub.snapshot();
+      const sessions = await activitySessionCatalog.list();
+      return { ...snapshot, sessions, tunnelAuth: await tunnelController.authStatus() };
+    },
+    loadLogSessionHistory: async (request: LoadLogSessionHistoryRequest): Promise<LoadLogSessionHistoryResult> => {
+      const workLog = await buildWorkLogHistory(auditRepository, workLogViewState, request);
+      logHub.syncWorkLog(workLog, []);
+      const sessions = await activitySessionCatalog.list();
+      return {
+        workLog,
+        logSnapshot: { ...logHub.snapshot(), sessions, tunnelAuth: await tunnelController.authStatus() },
+      };
+    },
+    clearLogBuffer: async (request: ClearLogBufferRequest): Promise<{ readonly cleared: boolean }> => {
+      const workspaceSummaries = (await workspaceRepository.listAll()).map(toWorkspaceSummary);
+      logHub.clear(request.source, request, workspaceSummaries);
+      return { cleared: true };
+    },
+    resolveActivityTargetDetail: async (detailRef): Promise<{ readonly status: 'complete' | 'unavailable'; readonly detail: ActivityTargetDetail | null }> => {
+      const detail = await auditRepository.resolveActivityTargetDetail(detailRef);
+      return detail === null ? { status: 'unavailable', detail: null } : { status: 'complete', detail };
+    },
+    searchActivityTargetDetails: async (candidates, query): Promise<readonly string[]> => (
+      searchActivityTargetDetails(auditRepository, candidates, query)
+    ),
+    streamWorkLogExportRows: (rowIds, locale): AsyncIterable<string> => streamWorkLogExportRows(auditRepository, rowIds, locale),
+    captureIncident: async (updaterEvents: readonly string[] = []): Promise<IncidentReport> => {
+      options.captureRuntimeDiagnostics?.();
+      const tunnel = await observedTunnelStatus();
+      const tunnelClientVersion = await tunnelController.clientVersion();
+      const relevantPids = await tunnelController.incidentRelevantPids();
+      const desktopSession = readDesktopSessionSnapshot(dataPath);
+      const desktopMemory = options.collectIncidentMemory?.();
+      const runtimeHistory = readRuntimeDiagnosticsHistory(dataPath);
+      return buildIncidentReport({
+        triggeredByUser: true,
+        appVersion: APP_VERSION,
+        tunnelClientVersion: tunnelClientVersion.value,
+        tunnelClientVersionReason: tunnelClientVersion.reason,
+        tunnel: { state: tunnel.state, source: tunnel.source, health: await tunnelController.incidentHealth() },
+        updaterEvents,
+        logLines: logHub.snapshot().lines,
+        crashEvents: readCrashEventHistory(dataPath),
+        ...(desktopSession === null ? {} : { desktopSession }),
+        crashDumps: readNativeCrashDumpMetadata(dataPath),
+        ...(desktopMemory === undefined ? {} : { desktopMemory }),
+        ...(runtimeHistory === null ? {} : { runtimeHistory }),
+        runtimeDiagnostics: tunnelController.incidentRuntimeDiagnostics(),
+        relevantPids: relevantPids.pids,
+        ...(relevantPids.unavailableReason === null ? {} : { relevantPidUnavailableReason: relevantPids.unavailableReason }),
+        collectProcessTree: collectRelevantProcessTree,
+        collectListeners: collectRelevantListeners,
+      });
+    },
+    getGitDiff: async (request: GetGitDiffRequest): Promise<GetGitDiffResponse> => {
+      const workspace = await workspaceRepository.get(request.workspaceId);
+      if (workspace === null) throw new Error('Workspace not found');
+
+      const guarded = await pathGuard.resolveForWrite(workspace, request.path);
+      const resolved = unwrap(guarded, 'Git diff path is invalid');
+      const relativePath = resolved.relativePath.replace(/\\/g, '/');
+      const fileActor: FileActor = { clientId: 'desktop-git', clientName: 'desktop-git' };
+      const diffResult = await gitService.diff(fileActor, workspace.id, {
+        path: relativePath,
+        ...(request.staged !== undefined ? { staged: request.staged } : {}),
+      });
+      if (!diffResult.ok) throw new Error(diffResult.error.message);
+
+      let patch = diffResult.value.patch;
+      const truncated = diffResult.value.truncated;
+      const numstat = new Map<string, { additions: number; deletions: number }>();
+      const statResult = await gitService.run(fileActor, {
+        workspaceId: workspace.id,
+        args: ['diff', ...(request.staged === true ? ['--cached'] : []), '--numstat', '--', relativePath],
+      });
+      if (statResult.ok && statResult.value.exitCode === 0) applyNumstat(numstat, statResult.value.stdout);
+      const stats = numstat.get(relativePath);
+      const imagePreview = await readGitImagePreview(workspace.realRootPath, relativePath, request.staged === true, patch, resolved.realPath);
+
+      const inspection = await inspectGitWorkingFile(resolved.realPath, relativePath);
+      let newContent: string | undefined;
+      if (imagePreview.oldImage === undefined && imagePreview.newImage === undefined && imagePreview.error === undefined
+        && !patch && inspection.kind === 'text' && resolved.exists && resolved.realPath !== undefined) {
+        const bounded = await readBoundedGitTextFile(resolved.realPath);
+        if (bounded !== null) {
+          newContent = bounded;
+          const lines = bounded.split(/\r?\n/);
+          patch = `--- /dev/null\n+++ b/${relativePath}\n@@ -0,0 +1,${lines.length} @@\n` + lines.map((line) => `+${line}`).join('\n') + '\n';
+        }
+      }
+
+      return {
+        path: relativePath,
+        patch,
+        truncated,
+        preview: {kind:inspection.kind,sizeBytes:inspection.sizeBytes,extension:inspection.extension,mimeType:inspection.mimeType},
+        ...(newContent !== undefined ? { newContent } : {}),
+        ...(imagePreview.oldImage === undefined ? {} : { oldImage: imagePreview.oldImage }),
+        ...(imagePreview.newImage === undefined ? {} : { newImage: imagePreview.newImage }),
+        ...(imagePreview.error === undefined ? {} : { imagePreviewError: imagePreview.error }),
+        ...(stats === undefined ? {} : { additions: stats.additions, deletions: stats.deletions }),
+      };
+    },
+  };
+
+  const closeRuntime = createRetryableShutdown(async (): Promise<void> => {
+    // The tunnel shutdown is the one step allowed to defer quitting. Run it
+    // before tearing down unrelated runtime services so a failed verification
+    // leaves the still-open Desktop usable for a retry.
+    await tunnelController.shutdownForDesktopExit();
+    stopToolAvailabilityWatch();
+    await remoteMcpController.close();
+    if (watcherHandle !== null) {
+      await watcherHandle.close();
+      watcherHandle = null;
+    }
+    logHub.stop();
+    await approvalWork?.close();
+    await mcpLifecycle.close();
+    debugSessions.close();
+    await extensionsService.close().catch(() => undefined);
+    await workspaceIndex.close().catch(() => undefined);
+    await startupBackup;
+    database.close();
+  });
+
+  return {
+    chromeWork,
+    approvalWork,
+    ...(hostMutationApprovalProvider === undefined ? {} : { hostMutationApprovalProvider }),
+    services,
+    mcpServices,
+    mcpActor,
+    activityTracker,
+    logHub,
+    toolAvailabilityService,
+    prepareFactoryReset: (): Promise<void> => tunnelController.prepareFactoryReset(),
+    getLocale: (): UiLocale => readLocale(settingsRepository),
+    getUserSettings: (): UserSettings => readSettings(),
+    getDestructivePolicy: (): DestructiveAutoApprovalPolicy => destructivePolicyProvider(),
+    getActiveWorkspaceScope: async (): Promise<WorkspaceScope | null> => {
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      return selected === null ? null : { workspaceId: selected.id, rootPath: selected.realRootPath };
+    },
+    getActiveWorkspaceScopes: async (): Promise<readonly WorkspaceScope[]> => (
+      (await resolveActiveProjectWorkspaces()).map((workspace) => ({ workspaceId: workspace.id, rootPath: workspace.realRootPath }))
+    ),
+    createBackup: (reason: BackupReason = 'manual'): Promise<BackupSummary> => backupService.create(reason),
+    ensureDefaultWorkspace: async (rootPath: string): Promise<string> => {
+      const existing = await workspaceService.list();
+      const resolvedRoot = resolveHostPath(rootPath, process.platform);
+      if (resolvedRoot === null) throw new Error('Workspace root uses a foreign host path syntax');
+      const comparableRoot = comparableHostPath(resolvedRoot, process.platform);
+      const matched = comparableRoot === null ? undefined : existing.find((workspace) => comparableHostPath(workspace.realRootPath, process.platform) === comparableRoot);
+      if (matched !== undefined && !isMachineRootPath(matched.realRootPath) && !isMachineRootPath(matched.rootPath)) {
+        settingsRepository.set(selectedWorkspaceSettingKey, matched.id);
+        await activateWorkspace(matched.id);
+        return matched.id;
+      }
+      const projects = existing.filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
+      const selectedId = settingsRepository.get(selectedWorkspaceSettingKey);
+      if (selectedId !== null) {
+        const selected = projects.find((workspace) => workspace.id === selectedId);
+        if (selected !== undefined) { await activateWorkspace(selected.id); return selected.id; }
+      }
+      if (!isMachineRootPath(resolvedRoot)) {
+        const displayName = path.basename(resolvedRoot) || 'Workspace';
+        const added = unwrap(await workspaceService.add(displayName, resolvedRoot), 'Workspace could not be added');
+        settingsRepository.set(selectedWorkspaceSettingKey, added.id);
+        await activateWorkspace(added.id);
+        return added.id;
+      }
+      if (projects[0] !== undefined) {
+        settingsRepository.set(selectedWorkspaceSettingKey, projects[0].id);
+        await activateWorkspace(projects[0].id);
+        return projects[0].id;
+      }
+      throw new Error('No project workspace is available');
+    },
+    autoStartMcp: async (): Promise<McpConnectionStatus> => {
+      const envWorkspacePath = process.env.LNWJUD_WORKSPACE?.trim();
+      if (envWorkspacePath !== undefined && envWorkspacePath.length > 0) {
+        const resolvedPath = resolveHostPath(envWorkspacePath, process.platform);
+        if (resolvedPath === null) throw new Error('LNWJUD_WORKSPACE uses a foreign host path syntax');
+        const existing = await workspaceService.list();
+        const comparablePath = comparableHostPath(resolvedPath, process.platform);
+        const matched = comparablePath === null ? undefined : existing.find((workspace) => comparableHostPath(workspace.realRootPath, process.platform) === comparablePath);
+        const workspaceId = matched === undefined
+          ? unwrap(await workspaceService.add(path.basename(resolvedPath) || 'Workspace', resolvedPath), 'Workspace could not be added').id
+          : matched.id;
+        settingsRepository.set(selectedWorkspaceSettingKey, workspaceId);
+        await activateWorkspace(workspaceId);
+        return mcpLifecycle.start();
+      }
+      const selected = await resolveSelectedWorkspace(workspaceService, settingsRepository);
+      if (selected === null) {
+        // First run: start MCP without scanning or registering drive letters.
+        // The user can add an explicit project in the UI when ready.
+        return mcpLifecycle.start();
+      }
+      await activateWorkspace(selected.id);
+      return mcpLifecycle.start();
+    },
+    autoStartWatcher: (): Promise<string | null> => startWatcher(),
+    autoStartTunnel: async (): Promise<TunnelStatus | null> => autoStartPersistentTunnel(
+      tunnelController,
+      readSettings().tunnelAutoReconnect,
+    ),
+    autoStartRemoteMcp: async (): Promise<RemoteMcpStatus> => {
+      const status = await remoteMcpController.status();
+      if (!status.autoStartEnabled || status.installed) return remoteMcpController.autoStartIfDesired();
+      return withInstallActivity('ngrok', 'Installing ngrok…', () => remoteMcpController.autoStartIfDesired());
+    },
+    close: closeRuntime,
+  };
+}
+
+/** Direct DesktopRuntime construction is test-only; production injects safeStorage output. */
+function resolveTestCheckpointEncryptionKey(): Buffer | undefined {
+  if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') return undefined;
+  const encoded = process.env.LNWJUD_CHECKPOINT_KEY_BASE64?.trim();
+  if (encoded === undefined || encoded.length === 0) return undefined;
+  const key = Buffer.from(encoded, 'base64');
+  if (key.byteLength !== 32 || key.toString('base64') !== encoded) throw new Error('LNWJUD_CHECKPOINT_KEY_BASE64 must decode to 32 bytes');
+  return key;
+}
+
+function bundledTunnelClientPath(): string | null {
+  const resourcesPath = (process as NodeJS.Process & { readonly resourcesPath?: string }).resourcesPath;
+  return resolveBundledTunnelClientPath({ resourcesPath });
+}
+
+function supportedHostArchitecture(architecture: string): 'x64' | 'arm64' {
+  if (architecture === 'x64' || architecture === 'arm64') return architecture;
+  throw new Error(`Unsupported host architecture: ${architecture}`);
+}
+
+export function resolveBundledTunnelClientPath(options: {
+  readonly resourcesPath?: string;
+  readonly platform?: NodeJS.Platform;
+  readonly architecture?: string;
+}): string | null {
+  const platform = options.platform ?? process.platform;
+  const architecture = options.architecture ?? process.arch;
+  const resourcesPath = options.resourcesPath;
+  if (typeof resourcesPath !== 'string' || resourcesPath.trim().length === 0) return null;
+  if (platform !== 'win32' && platform !== 'darwin' && platform !== 'linux') return null;
+  if (architecture !== 'x64' && architecture !== 'arm64') return null;
+  const executable = platform === 'win32' ? 'tunnel-client.exe' : 'tunnel-client';
+  const candidate = path.join(resourcesPath, 'tunnel-client', executable);
+  if (!existsSync(candidate)) return null;
+  const manifestPath = path.join(path.dirname(candidate), 'BUNDLED_TUNNEL_CLIENT.json');
+  const releaseTarget = platform === 'win32' ? 'windows' : platform;
+  const releaseArch = architecture === 'x64' ? 'amd64' : 'arm64';
+  const releasePrefix = `tunnel-client-v${BUNDLED_TUNNEL_CLIENT_VERSION}-${releaseTarget}-${releaseArch}`;
+  const expectedAsset = `${releasePrefix}.zip`;
+  // The upstream ZIP is verified and provenance-bound by the build stager but
+  // is deliberately not copied into the installed app. Keep the lightweight
+  // license, SPDX, and Sigstore evidence beside the executable so runtime
+  // integrity can be checked without shipping a second copy of the archive.
+  const expectedEvidence = {
+    licenseAsset: `${releasePrefix}-licenses.txt`,
+    spdxAsset: `${releasePrefix}.spdx.json`,
+    provenanceAsset: `tunnel-client-v${BUNDLED_TUNNEL_CLIENT_VERSION}-provenance.sigstore.json`,
+  } as const;
+  try {
+    const info = lstatSync(candidate);
+    if (!info.isFile() || info.isSymbolicLink()) return null;
+    if (realpathSync(candidate) !== candidate) return null;
+    if (platform !== 'win32' && (info.mode & 0o111) === 0) return null;
+    const manifestInfo = lstatSync(manifestPath);
+    if (!manifestInfo.isFile() || manifestInfo.isSymbolicLink() || realpathSync(manifestPath) !== manifestPath) return null;
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8')) as Record<string, unknown>;
+    const verified = manifest.verified as Record<string, unknown> | undefined;
+    if (manifest.schemaVersion !== 1
+      || manifest.product !== 'lnwjud'
+      || manifest.version !== BUNDLED_TUNNEL_CLIENT_VERSION
+      || manifest.platform !== platform
+      || manifest.arch !== architecture
+      || manifest.executable !== executable
+      || manifest.asset !== expectedAsset
+      || manifest.licenseAsset !== expectedEvidence.licenseAsset
+      || manifest.spdxAsset !== expectedEvidence.spdxAsset
+      || manifest.provenanceAsset !== expectedEvidence.provenanceAsset
+      || typeof manifest.executableSha256 !== 'string'
+      || !/^[0-9a-f]{64}$/iu.test(manifest.executableSha256)
+      || manifest.assetSha256 !== undefined && (typeof manifest.assetSha256 !== 'string' || !/^[0-9a-f]{64}$/iu.test(manifest.assetSha256))
+      || verified?.archiveSha256 !== true
+      || verified?.executableVersion !== true
+      || (platform !== 'win32' && verified?.executableBit !== true)
+      || (platform === 'win32' && verified?.executableBit !== false)) return null;
+    const bundleDirectory = path.dirname(candidate);
+    for (const evidenceName of Object.values(expectedEvidence)) {
+      if (!isTrustedBundledFile(path.join(bundleDirectory, evidenceName))) return null;
+    }
+    const bytes = readFileSync(candidate);
+    if (bytes.byteLength !== info.size) return null;
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    return digest === manifest.executableSha256.toLowerCase() ? candidate : null;
+  } catch {
+    return null;
+  }
+}
+
+function isTrustedBundledFile(filePath: string): boolean {
+  try {
+    const info = lstatSync(filePath);
+    return info.isFile() && !info.isSymbolicLink() && realpathSync(filePath) === filePath;
+  } catch {
+    return false;
+  }
+}
+
+function fixtureNodeExecutable(): string {
+  const executable = process.env.LNWJUD_E2E_NODE_PATH;
+  if (typeof executable !== 'string' || executable.trim().length === 0) {
+    throw new Error('Fixture Node executable is not configured');
+  }
+  return executable;
+}
+
+async function resolveSelectedWorkspace(
+  workspaceService: WorkspaceService,
+  settingsRepository: SqliteSettingsRepository,
+): Promise<Workspace | null> {
+  const workspaces = (await workspaceService.list()).filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath));
+  if (workspaces.length === 0) return null;
+  const selectedId = settingsRepository.get(selectedWorkspaceSettingKey);
+  const selected = selectedId === null ? undefined : workspaces.find((workspace) => workspace.id === selectedId);
+  return selected ?? workspaces[0] ?? null;
+}
+
+function parseStoredWorkspaceIds(value: string | null): string[] {
+  if (value === null || value.trim().length === 0) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return [...new Set(parsed.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0).map((entry) => entry.trim()))];
+  } catch {
+    return [...new Set(value.split(/[;,\r\n]+/).map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
+  }
+}
+
+function persistStoredWorkspaceIds(settingsRepository: SqliteSettingsRepository, key: string, ids: readonly string[]): void {
+  const unique = [...new Set(ids.map((id) => id.trim()).filter((id) => id.length > 0))];
+  if (unique.length === 0) settingsRepository.delete(key);
+  else settingsRepository.set(key, JSON.stringify(unique));
+}
+
+async function listTrackedProcesses(
+  processService: ProcessService,
+  trackedProcesses: Map<string, string>,
+): Promise<readonly ProcessSummary[]> {
+  const summaries: ProcessSummary[] = [];
+  for (const [processId, workspaceId] of trackedProcesses) {
+    const status = await processService.status(actor, workspaceId, processId);
+    if (!status.ok) {
+      if (status.error.code === 'PROCESS_NOT_FOUND') trackedProcesses.delete(processId);
+      continue;
+    }
+    const logs = await processService.logs(actor, workspaceId, processId, { tailLines: 20 });
+    summaries.push(toProcessSummary(status.value, workspaceId, logs.ok ? summarizeLogs([...logs.value.entries].reverse().map((entry) => entry.text)) : ''));
+  }
+  return summaries;
+}
+
+function toProcessSummary(processValue: ManagedProcess, workspaceId: string, logSummary: string): ProcessSummary {
+  return {
+    id: processValue.processId,
+    workspaceId,
+    sessionId: null,
+    executable: redactDisplayText(processValue.executable),
+    args: processValue.args.map(redactDisplayText),
+    state: processValue.state,
+    logSummary,
+  };
+}
+
+function toIpcBackupSummary(value: BackupSummary): IpcBackupSummary {
+  return {
+    id: value.id,
+    createdAt: value.createdAt,
+    reason: value.reason,
+    sizeBytes: value.sizeBytes,
+    ...(value.platform === undefined ? {} : { platform: value.platform }),
+    ...(value.arch === undefined ? {} : { arch: value.arch }),
+    ...(value.dataSchemaVersion === undefined ? {} : { dataSchemaVersion: value.dataSchemaVersion }),
+    ...(value.hostCompatibility === undefined ? {} : { hostCompatibility: value.hostCompatibility }),
+  };
+}
+
+function toIpcBackupRestoreNotice(value: StorageBackupRestoreNotice | null): IpcBackupRestoreNotice | null {
+  if (value === null) return null;
+  return {
+    schemaVersion: 1,
+    backupId: value.backupId,
+    restoredAt: value.restoredAt,
+    sourcePlatform: value.sourcePlatform,
+    sourceArch: value.sourceArch,
+    targetPlatform: value.targetPlatform,
+    targetArch: value.targetArch,
+    hostCompatibility: value.hostCompatibility,
+    incomplete: value.incomplete,
+    relinkRequired: value.relinkRequired,
+    quarantinedItems: value.quarantinedItems,
+  };
+}
+
+function toEngineeringDashboardTask(goal: GoalRecord | undefined): DashboardEngineeringHarnessStatus['task'] {
+  if (goal?.engineering === undefined) return null;
+  return {
+    goalId: goal.id,
+    goalKey: goal.goalKey,
+    currentPhase: goal.currentPhase,
+    nextAction: goal.nextAction,
+    primaryTaskKind: goal.engineering.primaryTaskKind,
+    riskTier: goal.engineering.riskTier,
+    deliveryScope: goal.engineering.deliveryScope,
+    gates: goal.engineering.gates.map((gate) => ({
+      id: gate.id,
+      title: gate.title,
+      applicability: gate.applicability,
+      status: gate.status,
+      reason: gate.reason,
+      ...(gate.evidence === undefined ? {} : { evidenceSource: gate.evidence.source }),
+    })),
+  };
+}
+
+function toWorkspaceSummary(workspace: Workspace): WorkspaceSummary {
+  return {
+    id: workspace.id,
+    displayName: workspace.displayName,
+    rootPath: workspace.rootPath,
+    realRootPath: workspace.realRootPath,
+    createdAt: workspace.createdAt,
+    archivedAt: workspace.archivedAt ?? null,
+    kind: isMachineRootPath(workspace.realRootPath) || isMachineRootPath(workspace.rootPath) ? 'machine_root' : 'project',
+  };
+}
+
+function isGeneratedAutoMachineRoot(workspace: Workspace): boolean {
+  return isDriveRoot(workspace.rootPath) && /^Local Disk [A-Z]:$/i.test(workspace.displayName.trim());
+}
+
+/** Restored cross-host registrations remain archived until the user relinks a real local directory. */
+async function assertWorkspaceRelinkable(workspace: Workspace): Promise<void> {
+  const resolved = resolveHostPath(workspace.realRootPath, process.platform);
+  if (resolved === null) throw new Error('Workspace was restored from another host; add or relink a local directory before activating it');
+  try {
+    if (!statSync(resolved).isDirectory()) throw new Error('Workspace relink target is not a directory');
+  } catch {
+    throw new Error('Workspace was restored from another host; add or relink a local directory before activating it');
+  }
+}
+
+const gitImageMimeByExtension: Readonly<Record<string, string>> = {
+  '.png': 'image/png', '.apng': 'image/apng', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.jpe': 'image/jpeg', '.jfif': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.bmp': 'image/bmp', '.dib': 'image/bmp', '.ico': 'image/x-icon', '.cur': 'image/x-icon',
+  '.svg': 'image/svg+xml', '.svgz': 'image/svg+xml', '.avif': 'image/avif', '.heic': 'image/heic', '.heif': 'image/heif',
+  '.tif': 'image/tiff', '.tiff': 'image/tiff', '.psd': 'image/vnd.adobe.photoshop', '.jp2': 'image/jp2', '.j2k': 'image/jp2', '.jxl': 'image/jxl',
+  '.dds': 'image/vnd-ms.dds', '.tga': 'image/x-tga', '.exr': 'image/x-exr', '.hdr': 'image/vnd.radiance', '.qoi': 'image/qoi',
+  '.pbm': 'image/x-portable-bitmap', '.pgm': 'image/x-portable-graymap', '.ppm': 'image/x-portable-pixmap', '.pnm': 'image/x-portable-anymap',
+  '.dng': 'image/x-adobe-dng', '.raw': 'image/x-raw', '.cr2': 'image/x-canon-cr2', '.cr3': 'image/x-canon-cr3', '.nef': 'image/x-nikon-nef',
+  '.nrw': 'image/x-nikon-nrw', '.arw': 'image/x-sony-arw', '.orf': 'image/x-olympus-orf', '.rw2': 'image/x-panasonic-rw2', '.raf': 'image/x-fuji-raf',
+  '.pef': 'image/x-pentax-pef', '.x3f': 'image/x-sigma-x3f',
+};
+
+type GitImageBytes = Buffer | null | 'too_large';
+
+async function readGitImagePreview(
+  repositoryPath: string,
+  relativePath: string,
+  staged: boolean,
+  patch: string,
+  workingTreePath: string | undefined,
+): Promise<{ oldImage?: GitImagePreview; newImage?: GitImagePreview; error?: 'too_large' | 'unsupported' }> {
+  const pathMime = gitImageMimeByExtension[path.extname(relativePath).toLowerCase()];
+  const workingTreeMime = !staged && patch.length === 0 && pathMime === undefined
+    ? await sniffWorkingTreeImageMime(workingTreePath)
+    : undefined;
+  const patchSuggestsImage = patch.includes('Binary files ') || patch.toLowerCase().includes('<svg');
+  if (pathMime === undefined && workingTreeMime === undefined && !patchSuggestsImage) return {};
+
+  const oldBytes = await readGitImageBytes(repositoryPath, staged ? `HEAD:${relativePath}` : `:${relativePath}`);
+  const newBytes = staged
+    ? await readGitImageBytes(repositoryPath, `:${relativePath}`)
+    : await readWorkingTreeImageBytes(workingTreePath);
+  const oldMime = Buffer.isBuffer(oldBytes) ? detectImageMime(oldBytes, pathMime) : undefined;
+  const newMime = Buffer.isBuffer(newBytes) ? detectImageMime(newBytes, pathMime ?? workingTreeMime) : undefined;
+  const isImage = oldMime !== undefined || newMime !== undefined || pathMime !== undefined || workingTreeMime !== undefined;
+  if (!isImage) return {};
+  if (oldBytes === 'too_large' || newBytes === 'too_large') return { error: 'too_large' };
+  const oldImage = Buffer.isBuffer(oldBytes) && oldMime !== undefined ? gitImagePreview(oldBytes, oldMime) : undefined;
+  const newImage = Buffer.isBuffer(newBytes) && newMime !== undefined ? gitImagePreview(newBytes, newMime) : undefined;
+  return {
+    ...(oldImage === undefined ? {} : { oldImage }),
+    ...(newImage === undefined ? {} : { newImage }),
+    ...(oldImage === undefined && newImage === undefined ? { error: 'unsupported' as const } : {}),
+  };
+}
+
+function gitImagePreview(bytes: Buffer, mimeType: string): GitImagePreview {
+  return { mimeType, dataBase64: bytes.toString('base64'), byteLength: bytes.byteLength };
+}
+
+function detectImageMime(bytes: Buffer, pathMime: string | undefined): string | undefined {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 6 && (bytes.subarray(0, 6).toString('ascii') === 'GIF87a' || bytes.subarray(0, 6).toString('ascii') === 'GIF89a')) return 'image/gif';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('ascii') === 'RIFF' && bytes.subarray(8, 12).toString('ascii') === 'WEBP') return 'image/webp';
+  if (bytes.length >= 2 && bytes.subarray(0, 2).toString('ascii') === 'BM') return 'image/bmp';
+  if (bytes.length >= 4 && bytes[0] === 0 && bytes[1] === 0 && (bytes[2] === 1 || bytes[2] === 2) && bytes[3] === 0) return 'image/x-icon';
+  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('ascii') === 'ftyp') {
+    const brand = bytes.subarray(8, 12).toString('ascii');
+    if (brand === 'avif' || brand === 'avis') return 'image/avif';
+    if (brand === 'heic' || brand === 'heix' || brand === 'hevc' || brand === 'hevx' || brand === 'mif1' || brand === 'msf1') return 'image/heif';
+  }
+  const prefix = bytes.subarray(0, Math.min(bytes.length, 512)).toString('utf8').replace(/^\uFEFF/, '').trimStart().toLowerCase();
+  if (prefix.startsWith('<svg') || (prefix.startsWith('<?xml') && prefix.includes('<svg'))) return 'image/svg+xml';
+  return pathMime;
+}
+
+async function sniffWorkingTreeImageMime(filePath: string | undefined): Promise<string | undefined> {
+  if (filePath === undefined) return undefined;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(filePath, 'r');
+    const sample = Buffer.alloc(512);
+    const { bytesRead } = await handle.read(sample, 0, sample.byteLength, 0);
+    return detectImageMime(sample.subarray(0, bytesRead), undefined);
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
+async function readWorkingTreeImageBytes(filePath: string | undefined): Promise<GitImageBytes> {
+  if (filePath === undefined) return null;
+  try {
+    const metadata = statSync(filePath);
+    if (!metadata.isFile()) return null;
+    if (metadata.size > MAX_GIT_IMAGE_PREVIEW_BYTES) return 'too_large';
+    return await readFile(filePath);
+  } catch {
+    return null;
+  }
+}
+
+async function readGitImageBytes(repositoryPath: string, objectSpec: string): Promise<GitImageBytes> {
+  return new Promise((resolve) => {
+    const child = spawn('git', ['show', '--no-textconv', objectSpec], {
+      cwd: repositoryPath,
+      env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+      shell: false,
+      windowsHide: true,
+    });
+    const chunks: Buffer[] = [];
+    let byteLength = 0;
+    let tooLarge = false;
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (tooLarge) return;
+      byteLength += chunk.byteLength;
+      if (byteLength > MAX_GIT_IMAGE_PREVIEW_BYTES) {
+        tooLarge = true;
+        child.kill();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    child.on('error', () => resolve(null));
+    child.on('close', (exitCode) => {
+      if (tooLarge) resolve('too_large');
+      else if (exitCode !== 0) resolve(null);
+      else resolve(Buffer.concat(chunks));
+    });
+  });
+}
+
+async function readBoundedGitTextFile(filePath: string): Promise<string | null> {
+  try {
+    const metadata = statSync(filePath);
+    if (!metadata.isFile() || metadata.size > MAX_GIT_DIFF_FALLBACK_BYTES) return null;
+    const contents = await readFile(filePath);
+    const { inspectGitFileBytes } = await import('./git-file-inspection.js');
+    const inspection = inspectGitFileBytes(contents,filePath);
+    return inspection.kind === 'text' ? inspection.text ?? null : null;
+  } catch {
+    return null;
+  }
+}
+
+function applyNumstat(map: Map<string, { additions: number; deletions: number }>, output: string): void {
+  for (const line of output.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const parts = trimmed.split('\t');
+    if (parts.length >= 3) {
+      const add = parts[0] === '-' ? 0 : parseInt(parts[0]!, 10) || 0;
+      const del = parts[1] === '-' ? 0 : parseInt(parts[1]!, 10) || 0;
+      const filePath = parts.slice(2).join('\t').replace(/\\/g, '/');
+      const existing = map.get(filePath);
+      if (existing) {
+        existing.additions += add;
+        existing.deletions += del;
+      } else {
+        map.set(filePath, { additions: add, deletions: del });
+      }
+    }
+  }
+}
+
+async function buildGitSummary(
+  workspace: Workspace,
+  gitService: GitService,
+  fileActor: FileActor,
+): Promise<DashboardSnapshot['gitSummary']> {
+  const result = await gitService.statusSummary(fileActor, workspace.id);
+  if (!result.ok) {
+    return {
+      branch: null,
+      changedFiles: 0,
+      stagedFiles: 0,
+      message: result.error.code === 'GIT_NOT_REPOSITORY' ? 'Not a Git repository' : 'Git status unavailable',
+      repositoryPath: workspace.realRootPath,
+      isRepo: false,
+      entries: [],
+    };
+  }
+  const branchResult = await gitService.branch(fileActor, workspace.id);
+  const branch = branchResult.ok ? branchResult.value : null;
+  const stagedFiles = result.value.entries.filter((entry) => entry.indexStatus !== ' ').length;
+
+  const numstatMap = new Map<string, { additions: number; deletions: number }>();
+  try {
+    const unstaged = await gitService.run(fileActor, { workspaceId: workspace.id, args: ['diff', '--numstat'] });
+    if (unstaged.ok && unstaged.value.exitCode === 0) {
+      applyNumstat(numstatMap, unstaged.value.stdout);
+    }
+    const staged = await gitService.run(fileActor, { workspaceId: workspace.id, args: ['diff', '--cached', '--numstat'] });
+    if (staged.ok && staged.value.exitCode === 0) {
+      applyNumstat(numstatMap, staged.value.stdout);
+    }
+  } catch {
+    // numstat is best effort
+  }
+
+  return {
+    branch,
+    changedFiles: result.value.entries.length,
+    stagedFiles,
+    message: result.value.entries.length === 0 ? 'Clean working tree' : `${result.value.entries.length} changed file(s)`,
+    repositoryPath: workspace.realRootPath,
+    isRepo: true,
+    entries: result.value.entries.map((entry) => {
+      const normalizedPath = entry.path.replace(/\\/g, '/');
+      const stats = numstatMap.get(normalizedPath);
+      return {
+        path: entry.path,
+        kind: entry.kind,
+        indexStatus: entry.indexStatus,
+        worktreeStatus: entry.worktreeStatus,
+        additions: stats?.additions ?? 0,
+        deletions: stats?.deletions ?? 0,
+      };
+    }),
+  };
+}
+
+async function buildCodexSummary(codexDiscovery: CodexDiscovery): Promise<DashboardSnapshot['codex']> {
+  const result = await codexDiscovery.discover();
+  if (!result.ok) return { installed: false, version: null };
+  return { installed: result.value.status.installed, version: result.value.status.version ?? null };
+}
+
+async function buildAuditSummary(
+  repository: AuditEventRepository,
+  settingsRepository: SqliteSettingsRepository,
+): Promise<readonly AuditEventSummary[]> {
+  const events = await listVisibleAuditEvents(repository, settingsRepository, 10);
+  return events.map((event) => ({ id: event.id, timestamp: event.timestamp, action: event.action, resultCode: event.resultCode }));
+}
+
+async function buildWorkLog(
+  repository: AuditEventRepository,
+  viewState: WorkLogViewState,
+): Promise<readonly WorkLogEntry[]> {
+  return (await listVisibleMcpEvents(repository, viewState, 500)).map(toWorkLogEntry);
+}
+
+async function buildWorkLogHistory(
+  repository: AuditEventRepository,
+  viewState: WorkLogViewState,
+  request: LoadLogSessionHistoryRequest,
+): Promise<readonly WorkLogEntry[]> {
+  const limit = request.limit === undefined || !Number.isInteger(request.limit) || request.limit < 1 || request.limit > 500 ? 500 : request.limit;
+  return (await listVisibleMcpEvents(repository, viewState, limit, {
+    ...(request.workspaceId === undefined ? {} : { workspaceId: request.workspaceId }),
+    sessionId: request.sessionId,
+  })).map(toWorkLogEntry);
+}
+
+function toWorkLogEntry(event: ActivityAuditEvent): WorkLogEntry {
+  return {
+    id: event.id,
+    timestamp: event.timestamp,
+    kind: classifyMcpWorkLogKind(event.toolName, event.phase, event.resultCode),
+    level: classifyMcpLogLevel(event.toolName, event.phase, event.resultCode, event.errorMessage ?? null),
+    toolName: event.toolName,
+    resultCode: event.resultCode,
+    errorMessage: event.errorMessage ?? null,
+    targetSummary: event.targetSummary ?? null,
+    targetDetail: event.targetDetail,
+    durationMs: event.durationMs,
+    workspaceId: event.workspaceId ?? null,
+    sessionId: event.sessionId ?? null,
+    ...(event.callId === undefined ? {} : { callId: event.callId }),
+  };
+}
+
+async function listVisibleMcpEvents(
+  repository: AuditEventRepository,
+  viewState: WorkLogViewState,
+  limit: number,
+  scope: { readonly workspaceId?: string; readonly sessionId?: string } = {},
+): Promise<readonly ActivityAuditEvent[]> {
+  const events = await repository.listActivityScoped({ actionPrefix: 'mcp_tool:', ...scope }, limit);
+  return events.filter((event) => viewState.isVisible(event));
+}
+
+async function listVisibleAuditEvents(
+  repository: AuditEventRepository,
+  settingsRepository: SqliteSettingsRepository,
+  limit: number,
+): Promise<readonly AuditEventSummaryProjection[]> {
+  const clearedAt = settingsRepository.get(workLogClearedSettingKey);
+  const events = await repository.listSummaries(limit);
+  if (clearedAt === null) return events;
+  return events.filter((event) => event.timestamp > clearedAt);
+}
+
+function toInFlightItem(
+  entry: { callId: string; toolName: string; startedAt: string; targetSummary?: string; targetDetail: InFlightWorkItem['targetDetail']; workspaceId?: string; sessionId?: string },
+  logSessionId?: string,
+): InFlightWorkItem {
+  return {
+    callId: entry.callId,
+    toolName: entry.toolName,
+    startedAt: entry.startedAt,
+    targetSummary: entry.targetSummary ?? null,
+    targetDetail: entry.targetDetail,
+    workspaceId: entry.workspaceId ?? null,
+    sessionId: logSessionId ?? entry.sessionId ?? null,
+  };
+}
+
+function deriveAgentState(running: boolean, inFlightCount: number): AgentState {
+  if (!running) return 'stopped';
+  return inFlightCount > 0 ? 'busy' : 'idle';
+}
+
+function buildConnectionModes(input: {
+  readonly httpUrl: string | null;
+  readonly workspaceRoot?: string;
+  readonly profile: PermissionProfileName;
+  readonly strictRoots: boolean;
+  readonly allowedRoots: readonly string[];
+  readonly fullBypassAll: boolean;
+}): ConnectionModes {
+  const isWindows = process.platform === 'win32';
+  const launcherName = isWindows ? 'lnwjud-mcp-stdio.cmd' : 'lnwjud-mcp-stdio';
+  const executableName = isWindows ? path.win32.basename(process.execPath).toLowerCase() : path.basename(process.execPath);
+  const launcher = executableName === (isWindows ? 'lnwjud.exe' : 'lnwjud')
+    ? path.join(path.dirname(process.execPath), ...(process.platform === 'darwin' ? ['..', 'Resources'] : []), launcherName)
+    : launcherName;
+  const args = [quoteCommandArgument(launcher)];
+  if (input.workspaceRoot !== undefined) args.push('--workspace', quoteCommandArgument(input.workspaceRoot));
+  args.push('--profile', input.profile);
+  if (input.fullBypassAll && input.profile === 'full') args.push('--full-bypass-all');
+  if (input.strictRoots && !(input.fullBypassAll && input.profile === 'full')) {
+    args.push('--strict-roots');
+    for (const root of input.allowedRoots) args.push('--allowed-root', quoteCommandArgument(root));
+  }
+  return { httpUrl: input.httpUrl, stdioCommand: args.join(' ') };
+}
+
+function quoteCommandArgument(value: string): string {
+  return /[\s&()[\]{}^=;!'+,`~]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+function readUserSettings(settingsRepository: SqliteSettingsRepository, env: NodeJS.ProcessEnv): UserSettings {
+  const extensions = parseExtensionsSettings(settingsRepository.get(EXTENSIONS_SETTINGS_KEY));
+  const engineeringHarness = parseEngineeringHarnessSettings(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessSettings));
+  return {
+    customPermission: parseCustomPermissionSettings(settingsRepository.get(USER_SETTING_KEYS.customPermissionProfile)),
+    desktopFullBypassAll: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.desktopFullBypassAll), false),
+    stdioFullBypassAll: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.stdioFullBypassAll), false),
+    mcpCallTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpCallTimeoutMs), DEFAULT_MCP_CALL_TIMEOUT_MS, 1_000, 60 * 60_000),
+    mcpIdleTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpIdleTimeoutMs), DEFAULT_MCP_IDLE_TIMEOUT_MS, 30_000, 24 * 60 * 60_000),
+    processTimeoutMs: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.processTimeoutMs), DEFAULT_PROCESS_TIMEOUT_MS, 1_000, 4 * 60 * 60_000),
+    mcpPollWaitSeconds: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.mcpPollWaitSeconds), DEFAULT_MCP_POLL_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
+    shellSynchronousWaitSeconds: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.shellSynchronousWaitSeconds), DEFAULT_SHELL_SYNCHRONOUS_WAIT_SECONDS, MIN_CONFIGURABLE_WAIT_SECONDS, MAX_CONFIGURABLE_WAIT_SECONDS),
+    capabilityRoots: parsePathList(settingsRepository.get(USER_SETTING_KEYS.capabilityRoots)),
+    pdfProviderPath: settingsRepository.get(USER_SETTING_KEYS.pdfProviderPath)?.trim() ?? '',
+    lspCommands: parseStringRecordSetting(settingsRepository.get(USER_SETTING_KEYS.lspCommands)),
+    mcpHttpPort: readMcpPort(env.LNWJUD_MCP_PORT ?? settingsRepository.get(USER_SETTING_KEYS.mcpHttpPort) ?? undefined),
+    mcpAllowedHostnames: parseMcpAllowedHostnames(env.LNWJUD_MCP_ALLOWED_HOSTNAMES ?? settingsRepository.get(USER_SETTING_KEYS.mcpAllowedHostnames) ?? undefined),
+    codexToolsEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.codexToolsEnabled), DEFAULT_CODEX_TOOLS_ENABLED),
+    eccEnabled: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.eccEnabled), DEFAULT_ECC_ENABLED),
+    ponytailMode: parsePonytailMode(settingsRepository.get(USER_SETTING_KEYS.ponytailMode), DEFAULT_PONYTAIL_MODE),
+    engineeringHarness: engineeringHarness.settings,
+    engineeringHarnessWorkspaceOverrides: parseEngineeringHarnessWorkspaceOverrides(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessWorkspaceOverrides)),
+    engineeringHarnessDiagnostic: engineeringHarness.diagnostic,
+    updateAutoCheck: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.updateAutoCheck), true),
+    updateCheckOnStartup: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.updateCheckOnStartup), true),
+    updateIntervalMinutes: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.updateIntervalMinutes), DEFAULT_UPDATE_INTERVAL_MINUTES, 5, 24 * 60),
+    updateAutoDownload: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.updateAutoDownload), true),
+    closeBehavior: parseCloseBehavior(settingsRepository.get(USER_SETTING_KEYS.closeBehavior)),
+    launchAtStartup: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.launchAtStartup), false),
+    startMinimized: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.startMinimized), false),
+    tunnelAutoReconnect: parseBooleanSetting(settingsRepository.get(USER_SETTING_KEYS.tunnelAutoReconnect), false),
+    tunnelMaxAutoRestarts: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.tunnelMaxAutoRestarts), DEFAULT_TUNNEL_MAX_AUTO_RESTARTS, 0, 50),
+    recoveryRetentionDays: parseIntegerSetting(settingsRepository.get(USER_SETTING_KEYS.recoveryRetentionDays) ?? undefined, DEFAULT_RECOVERY_RETENTION_DAYS, 0, 3650),
+    extensions: toIpcExtensionsSettings(extensions),
+  };
+}
+
+function persistUserSettings(settingsRepository: SqliteSettingsRepository, settings: UserSettings): void {
+  settingsRepository.set(USER_SETTING_KEYS.customPermissionProfile, serializeCustomPermissionSettings(settings.customPermission));
+  settingsRepository.set(USER_SETTING_KEYS.desktopFullBypassAll, settings.desktopFullBypassAll ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.stdioFullBypassAll, settings.stdioFullBypassAll ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.mcpCallTimeoutMs, String(settings.mcpCallTimeoutMs));
+  settingsRepository.set(USER_SETTING_KEYS.mcpIdleTimeoutMs, String(settings.mcpIdleTimeoutMs));
+  settingsRepository.set(USER_SETTING_KEYS.processTimeoutMs, String(settings.processTimeoutMs));
+  settingsRepository.set(USER_SETTING_KEYS.mcpPollWaitSeconds, String(settings.mcpPollWaitSeconds));
+  settingsRepository.set(USER_SETTING_KEYS.shellSynchronousWaitSeconds, String(settings.shellSynchronousWaitSeconds));
+  settingsRepository.set(USER_SETTING_KEYS.capabilityRoots, serializePathList(settings.capabilityRoots));
+  settingsRepository.set(USER_SETTING_KEYS.pdfProviderPath, settings.pdfProviderPath.trim());
+  settingsRepository.set(USER_SETTING_KEYS.lspCommands, serializeStringRecordSetting(settings.lspCommands));
+  settingsRepository.set(USER_SETTING_KEYS.mcpHttpPort, String(settings.mcpHttpPort));
+  settingsRepository.set(USER_SETTING_KEYS.mcpAllowedHostnames, serializeMcpAllowedHostnames(settings.mcpAllowedHostnames));
+  settingsRepository.set(USER_SETTING_KEYS.codexToolsEnabled, settings.codexToolsEnabled ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.eccEnabled, settings.eccEnabled === true ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.ponytailMode, settings.ponytailMode);
+  if (settings.engineeringHarness !== undefined) {
+    settingsRepository.set(USER_SETTING_KEYS.engineeringHarnessSettings, serializeEngineeringHarnessSettings(settings.engineeringHarness));
+  }
+  if (settings.engineeringHarnessWorkspaceOverrides !== undefined) {
+    settingsRepository.set(USER_SETTING_KEYS.engineeringHarnessWorkspaceOverrides, serializeEngineeringHarnessWorkspaceOverrides(settings.engineeringHarnessWorkspaceOverrides));
+  }
+  settingsRepository.set(USER_SETTING_KEYS.updateAutoCheck, settings.updateAutoCheck ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.updateCheckOnStartup, settings.updateCheckOnStartup ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.updateIntervalMinutes, String(settings.updateIntervalMinutes));
+  settingsRepository.set(USER_SETTING_KEYS.updateAutoDownload, settings.updateAutoDownload ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.closeBehavior, settings.closeBehavior);
+  settingsRepository.set(USER_SETTING_KEYS.launchAtStartup, settings.launchAtStartup ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.startMinimized, settings.startMinimized ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.tunnelAutoReconnect, settings.tunnelAutoReconnect ? 'true' : 'false');
+  settingsRepository.set(USER_SETTING_KEYS.tunnelMaxAutoRestarts, String(settings.tunnelMaxAutoRestarts));
+  settingsRepository.set(USER_SETTING_KEYS.recoveryRetentionDays, String(settings.recoveryRetentionDays));
+  const extraMcpServers = Object.fromEntries(settings.extensions.extraMcpServers.map((server) => [server.name, {
+    command: server.command,
+    ...(server.args.length === 0 ? {} : { args: [...server.args] }),
+    ...(server.cwd.trim().length === 0 ? {} : { cwd: server.cwd.trim() }),
+    ...(server.type.trim().length === 0 ? {} : { type: server.type.trim() }),
+    ...(Object.keys(server.env).length === 0 ? {} : { env: { ...server.env } }),
+  }]));
+  settingsRepository.set(EXTENSIONS_SETTINGS_KEY, JSON.stringify({
+    mode: settings.extensions.mode,
+    disabledServers: [...settings.extensions.disabledServers],
+    enabledServers: [...settings.extensions.enabledServers],
+    disabledSkillRoots: [...settings.extensions.disabledSkillRoots],
+    extraSkillRoots: [...settings.extensions.extraSkillRoots],
+    extraMcpServers,
+  }));
+}
+
+function toIpcExtensionsSettings(settings: ExtensionsSettings): UserSettings['extensions'] {
+  return {
+    mode: settings.mode,
+    disabledServers: [...settings.disabledServers],
+    enabledServers: [...settings.enabledServers],
+    disabledSkillRoots: [...settings.disabledSkillRoots],
+    extraSkillRoots: [...settings.extraSkillRoots],
+    extraMcpServers: Object.entries(settings.extraMcpServers).map(([name, config]) => ({
+      name,
+      command: config.command,
+      args: [...(config.args ?? [])],
+      cwd: config.cwd ?? '',
+      type: config.type ?? '',
+      env: { ...(config.env ?? {}) },
+    })),
+  };
+}
+
+function customPermissionProfile(settingsRepository: SqliteSettingsRepository): PermissionProfile {
+  const custom = parseCustomPermissionSettings(settingsRepository.get(USER_SETTING_KEYS.customPermissionProfile));
+  return {
+    name: 'custom',
+    defaults: { READ: custom.read, WRITE: custom.write, EXECUTE: custom.execute, DANGEROUS: custom.dangerous },
+    allowedProjectExecutables: [...new Set([...permissionProfiles.custom.allowedProjectExecutables, ...custom.allowedExecutables])],
+  };
+}
+
+function runtimeRestartRequired(previous: UserSettings, next: UserSettings): boolean {
+  return previous.desktopFullBypassAll !== next.desktopFullBypassAll
+    || previous.stdioFullBypassAll !== next.stdioFullBypassAll
+    || previous.mcpCallTimeoutMs !== next.mcpCallTimeoutMs
+    || previous.mcpIdleTimeoutMs !== next.mcpIdleTimeoutMs
+    || previous.mcpHttpPort !== next.mcpHttpPort
+    || JSON.stringify(previous.mcpAllowedHostnames) !== JSON.stringify(next.mcpAllowedHostnames)
+    || previous.ponytailMode !== next.ponytailMode
+    || JSON.stringify(previous.engineeringHarness) !== JSON.stringify(next.engineeringHarness)
+    || JSON.stringify(previous.engineeringHarnessWorkspaceOverrides) !== JSON.stringify(next.engineeringHarnessWorkspaceOverrides)
+    || JSON.stringify(previous.lspCommands) !== JSON.stringify(next.lspCommands)
+    || JSON.stringify(previous.customPermission) !== JSON.stringify(next.customPermission);
+}
+
+function readPermissionProfile(value: string | null): PermissionProfileName {
+  return value === 'safe' || value === 'balanced' || value === 'full' || value === 'custom' ? value : 'balanced';
+}
+
+function readLocale(settingsRepository: SqliteSettingsRepository): UiLocale {
+  const value = settingsRepository.get(localeSettingKey);
+  return value === 'en' ? 'en' : 'th';
+}
+
+export const DEFAULT_MCP_HTTP_PORT = 0;
+const LEGACY_DEFAULT_MCP_HTTP_PORT = 18_765;
+
+function migrateLegacyMcpHttpPort(settingsRepository: SqliteSettingsRepository, env: NodeJS.ProcessEnv): void {
+  if ((env.LNWJUD_MCP_PORT ?? '').trim().length > 0) return;
+  if (settingsRepository.get(USER_SETTING_KEYS.mcpHttpPortAutoMigrationV1) === '1') return;
+  const stored = settingsRepository.get(USER_SETTING_KEYS.mcpHttpPort)?.trim();
+  if (stored === undefined || stored.length === 0 || stored === String(LEGACY_DEFAULT_MCP_HTTP_PORT) || stored === '5000') {
+    settingsRepository.set(USER_SETTING_KEYS.mcpHttpPort, String(DEFAULT_MCP_HTTP_PORT));
+  }
+  settingsRepository.set(USER_SETTING_KEYS.mcpHttpPortAutoMigrationV1, '1');
+}
+
+function readMcpPort(value: string | undefined): number {
+  if (value === undefined || value.trim().length === 0) return DEFAULT_MCP_HTTP_PORT;
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 0 || port > 65_535) throw new Error('LNWJUD_MCP_PORT must be an integer from 0 to 65535');
+  if (port === 5_000) return DEFAULT_MCP_HTTP_PORT;
+  return port;
+}
+
+function unwrap<T>(result: Result<T>, fallback: string): T {
+  if (result.ok) return result.value;
+  throw new Error(result.error.message || fallback);
+}
+
+function toManagedBrowserStatus(value: unknown): ManagedBrowserStatus {
+  if (!isRecord(value) || typeof value.ready !== 'boolean' || typeof value.port !== 'number' || !Number.isInteger(value.port)
+    || typeof value.launched !== 'boolean') {
+    throw new Error('Managed Chrome returned an invalid status');
+  }
+  return { ready: value.ready, port: value.port, launched: value.launched };
+}
+
+async function checkExecutable(resolver: PathExecutableResolver, executable: string, missingStatus: 'warn' | 'fail'): Promise<{ readonly status: 'pass' | 'warn' | 'fail'; readonly message: string }> {
+  const result = await resolver.resolve(executable);
+  return result.ok ? { status: 'pass', message: `${executable} is available` } : { status: missingStatus, message: `${executable} is not available` };
+}
+
+function triStateLabel(value: boolean | null): string {
+  return value === null ? 'unknown' : value ? 'ok' : 'failed';
+}
+
+function toStructuredDoctorCheck(id: string, required: boolean, status: DoctorCheck['status'], message: string): DoctorCheck {
+  return {
+    id,
+    required,
+    status,
+    title: id.replaceAll('_', ' ').replaceAll('-', ' '),
+    summary: message,
+    affectedToolNames: [],
+    checkedAt: new Date().toISOString(),
+    durationMs: 0,
+    message,
+  };
+}
+
+export async function searchActivityTargetDetails(
+  repository: SqliteAuditRepository,
+  candidates: readonly ActivityTargetSearchCandidate[],
+  query: string,
+): Promise<readonly string[]> {
+  const needle = query.trim();
+  if (needle.length === 0) return [];
+  const detailRefs = [...new Set(candidates.flatMap((candidate) => candidate.detailRef === null ? [] : [candidate.detailRef]))];
+  if (detailRefs.length === 0) return [];
+  const matchingRefs = await repository.activityTargetDetailsMatching(detailRefs, needle);
+  return candidates.flatMap((candidate) => candidate.detailRef !== null && matchingRefs.has(candidate.detailRef) ? [candidate.id] : []);
+}
+
+export async function resolveWorkLogExportRows(
+  repository: SqliteAuditRepository,
+  identities: readonly string[],
+  locale: UiLocale = 'th',
+): Promise<readonly string[]> {
+  const rows: string[] = [];
+  for await (const row of streamWorkLogExportRows(repository, identities, locale)) rows.push(row);
+  return rows;
+}
+
+export async function* streamWorkLogExportRows(
+  repository: Pick<SqliteAuditRepository, 'resolveActivityEvent' | 'resolveActivityTargetDetail'>,
+  identities: readonly string[],
+  locale: UiLocale = 'th',
+): AsyncIterable<string> {
+  for (const identity of identities) {
+    const parsed = parseWorkLogIdentity(identity);
+    if (parsed === null) continue;
+    const event = await repository.resolveActivityEvent(parsed.value, parsed.kind === 'audit' ? 'event' : 'started-call');
+    if (event === null) {
+      yield 'Detail unavailable: the retained audit event no longer exists.';
+      continue;
+    }
+    if (event.targetDetail.legacyIncomplete && event.targetDetail.itemCount > event.targetDetail.preview.length) {
+      yield formatActivityExportRow(event, null, locale);
+      continue;
+    }
+    const detailRef = event.targetDetail.detailRef ?? event.callId ?? (parsed.kind === 'audit' ? event.id : parsed.value);
+    const detail = await repository.resolveActivityTargetDetail(detailRef);
+    yield formatActivityExportRow(event, detail, locale);
+  }
+}
+
+export async function writeSerializedLogRows(filePath: string, rows: Iterable<string> | AsyncIterable<string>): Promise<void> {
+  const handle = await open(filePath, 'w');
+  try {
+    for await (const row of rows) await handle.write(`${row}\r\n`, undefined, 'utf8');
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function parseWorkLogIdentity(value: string): { readonly kind: 'audit' | 'inflight'; readonly value: string } | null {
+  const separator = value.indexOf(':');
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const kind = value.slice(0, separator);
+  if (kind !== 'audit' && kind !== 'inflight') return null;
+  return { kind, value: value.slice(separator + 1) };
+}
+
+function formatActivityExportRow(event: ActivityAuditEvent, detail: ActivityTargetDetail | null, locale: UiLocale): string {
+  const kind = classifyMcpWorkLogKind(event.toolName, event.phase, event.resultCode);
+  const level = classifyMcpLogLevel(event.toolName, event.phase, event.resultCode, event.errorMessage ?? null);
+  const labels = locale === 'th'
+    ? { time: 'เวลา', type: 'ประเภท', severity: 'ระดับ', tool: 'เครื่องมือ', result: 'ผลลัพธ์', duration: 'ระยะเวลา', target: 'เป้าหมาย', error: 'รายละเอียด', workspace: 'Workspace', session: 'Session', technical: 'ข้อมูลทางเทคนิค' }
+    : { time: 'Time', type: 'Type', severity: 'Severity', tool: 'Tool', result: 'Result', duration: 'Duration', target: 'Target', error: 'Detail', workspace: 'Workspace', session: 'Session', technical: 'Technical metadata' };
+  const readable = [
+    `${labels.time}: ${formatActivityExportTimestamp(event.timestamp, locale)}`,
+    `${labels.type}: ${kind === 'task' ? 'TASK' : 'RESULT'}`,
+    `${labels.severity}: ${level.toUpperCase()}`,
+    `${labels.tool}: ${event.toolName}`,
+    `${labels.result}: ${event.resultCode}`,
+    `${labels.duration}: ${event.durationMs} ms`,
+    `${labels.workspace}: ${event.workspaceId ?? '-'}`,
+    `${labels.session}: ${event.sessionId ?? '-'}`,
+    ...(event.targetSummary === undefined || event.targetSummary.trim().length === 0 ? [] : [`${labels.target}: ${event.targetSummary}`]),
+    ...(event.errorMessage === undefined || event.errorMessage.trim().length === 0 ? [] : [`${labels.error}: ${event.errorMessage}`]),
+  ];
+  const metadata = [
+    `eventId=${event.id}`,
+    `callId=${event.callId ?? '<none>'}`,
+    `workspaceId=${event.workspaceId ?? '<none>'}`,
+    `sessionId=${event.sessionId ?? '<none>'}`,
+    `toolName=${event.toolName}`,
+    `phase=${event.phase}`,
+    `level=${level}`,
+    `resultCode=${event.resultCode}`,
+    `durationMs=${event.durationMs}`,
+    ...(event.targetSummary === undefined ? [] : [`targetSummary=${event.targetSummary}`]),
+    ...(event.errorMessage === undefined ? [] : [`errorMessage=${event.errorMessage}`]),
+  ];
+  const baseWithMetadata = `${readable.join('\r\n')}\r\n\r\n${labels.technical}:\r\n${metadata.map((entry) => `  ${entry}`).join('\r\n')}`;
+  if (event.targetDetail.legacyIncomplete && event.targetDetail.itemCount > event.targetDetail.preview.length) {
+    return formatIncompleteLegacyHistory(baseWithMetadata);
+  }
+  const detailExpected = event.targetDetail.detailRef !== null && event.targetDetail.itemCount > event.targetDetail.preview.length;
+  return formatCompleteTargetDetail(baseWithMetadata, detail, detailExpected, locale);
+}
+
+export function formatIncompleteLegacyHistory(base: string): string {
+  return `${base}\r\nIncomplete legacy history: omitted target items were not retained.`;
+}
+
+export function formatCompleteTargetDetail(base: string, detail: ActivityTargetDetail | null, detailExpected = false, locale: UiLocale = 'th'): string {
+  if (detail === null) {
+    if (!detailExpected) return base;
+    return `${base}\r\n\r\n${locale === 'th' ? 'รายละเอียดเป้าหมายฉบับเต็มไม่พร้อมใช้งาน รายการนี้อาจไม่ครบ' : 'Complete target detail unavailable; this row may be incomplete.'}`;
+  }
+  if (detail.items.length === 0) return base;
+  const heading = locale === 'th'
+    ? detail.kind === 'files' ? 'ไฟล์ที่เกี่ยวข้อง' : detail.kind === 'tools' ? 'เครื่องมือที่เกี่ยวข้อง' : 'รายละเอียดเพิ่มเติม'
+    : detail.kind === 'files' ? 'Files' : detail.kind === 'tools' ? 'Tools' : 'Details';
+  return `${base}\r\n\r\n${heading}:\r\n${detail.items.map((item) => `  - ${formatDisplayTimestampItem(item, locale)}`).join('\r\n')}`;
+}
+
+function unavailableTunnelOAuthBackend(): TunnelOAuthProvisioningBackend {
+  const unavailable = (): never => {
+    throw new Error('OAuth tunnel provisioning is unavailable: OpenAI does not currently expose a supported Tunnel control-plane OAuth credential exchange');
+  };
+  return {
+    descriptor: {
+      id: 'openai-tunnel-native-oauth',
+      authorizationEndpoint: 'https://platform.openai.com/',
+      tokenEndpoint: 'https://platform.openai.com/',
+      clientId: 'unavailable',
+      scopes: [],
+      enabled: false,
+      supportsTunnelProvisioning: false,
+    },
+    exchangeAuthorizationCode: async () => unavailable(),
+    refreshAndProvision: async () => unavailable(),
+  };
+}
+
+function formatActivityExportTimestamp(value: string, locale: UiLocale): string {
+  return formatDisplayDateTime(value, locale, { fallback: value });
+}
+
+export function buildPersistentTunnelDoctorChecks(input: {
+  readonly tunnel: TunnelStatus;
+  readonly mcp: McpConnectionStatus;
+  readonly tunnelHealth: { readonly state: 'live' | 'unhealthy' | 'unavailable' | 'unknown'; readonly message: string | null };
+  readonly persistentEnabled: boolean;
+  readonly remoteMcpActive?: boolean;
+}): readonly DoctorCheck[] {
+  if (input.remoteMcpActive) return [];
+  const persistent = input.tunnel.persistent;
+  const required = input.persistentEnabled;
+  const identityPresent = persistent?.tunnelIdMasked !== null && persistent?.tunnelIdMasked !== undefined;
+  const nativeRuntime = persistent?.mode === 'native-managed' || persistent?.runtimeAliasActive === true;
+  const runtimeRunning = input.tunnel.state === 'running' && (persistent === null || persistent.state === 'running');
+  const localBindingMatches = persistent?.localMcpUrl !== null && persistent?.localMcpUrl !== undefined
+    && input.mcp.url !== null && sameLocalMcpEndpoint(persistent.localMcpUrl, input.mcp.url);
+  const mismatch = persistent?.lastErrorCode === 'TUNNEL_ID_MISMATCH';
+  const controlPlaneHealthy = persistent?.pollHealthy;
+  const health = persistent?.healthy ?? (input.tunnelHealth.state === 'live' ? true : input.tunnelHealth.state === 'unhealthy' ? false : null);
+  const ready = persistent?.ready ?? null;
+
+  const check = (id: string, status: DoctorCheck['status'], message: string, isRequired = required): DoctorCheck => toStructuredDoctorCheck(id, isRequired, status, message);
+  return [
+    check('persistent_tunnel_identity', identityPresent ? 'pass' : required ? 'fail' : 'warn', identityPresent ? 'Saved tunnel identity is configured' : 'TUNNEL_ID_MISMATCH: persistent tunnel identity is not configured'),
+    check('runtime_alias_state', nativeRuntime ? 'pass' : persistent === null ? 'warn' : 'warn', nativeRuntime ? 'Native runtime alias lnwjud is active' : 'TUNNEL_RUNTIME_DOWN: native runtime alias is not active', false),
+    check('runtime_process_running', runtimeRunning ? 'pass' : required ? 'fail' : 'warn', runtimeRunning ? 'Tunnel runtime is running' : 'TUNNEL_RUNTIME_DOWN: tunnel runtime is not running'),
+    check('tunnel_health', health === true ? 'pass' : health === false ? 'fail' : 'warn', health === true ? 'Tunnel health is OK' : health === false ? 'TUNNEL_RUNTIME_DOWN: tunnel health probe failed' : 'Tunnel health is not currently observable'),
+    check('tunnel_ready', ready === true ? 'pass' : ready === false ? 'fail' : 'warn', ready === true ? 'Tunnel readiness is OK' : ready === false ? 'TUNNEL_RUNTIME_DOWN: tunnel is not ready' : 'Tunnel readiness is not currently observable'),
+    check(
+      'control_plane_poll_health',
+      controlPlaneHealthy === true || (controlPlaneHealthy == null && runtimeRunning && health === true) || !required ? 'pass' : controlPlaneHealthy === false ? 'fail' : 'warn',
+      controlPlaneHealthy === true
+        ? 'Control-plane poll is healthy'
+        : controlPlaneHealthy === false
+          ? 'CONTROL_PLANE_OFFLINE: control-plane polling is unhealthy'
+          : runtimeRunning && health === true
+            ? 'Control-plane poll is not reported separately; live tunnel health confirms the runtime is reachable'
+            : !required
+              ? 'Persistent tunnel polling is optional and currently disabled'
+              : 'Control-plane poll health is not currently observable',
+    ),
+    check('local_mcp_binding', localBindingMatches ? 'pass' : required ? 'fail' : 'warn', localBindingMatches ? 'Tunnel is bound to the current Desktop MCP endpoint' : 'LOCAL_BINDING_STALE: tunnel local MCP binding does not match the active Desktop MCP endpoint'),
+    check('local_mcp_reachable', input.mcp.running && input.mcp.url !== null ? 'pass' : required ? 'fail' : 'warn', input.mcp.running && input.mcp.url !== null ? 'Desktop MCP listener is reachable locally' : 'LOCAL_MCP_DOWN: Desktop MCP listener is not running'),
+    check('tunnel_id_matches_saved_identity', mismatch ? 'fail' : identityPresent ? 'pass' : 'warn', mismatch ? 'TUNNEL_ID_MISMATCH: runtime alias reports a different tunnel identity' : identityPresent ? 'Runtime has not reported a tunnel identity mismatch' : 'Saved tunnel identity is unavailable'),
+    check(
+      'tunnel_auth_method',
+      (input.tunnel.authReady ?? input.tunnel.hasApiKey) ? 'pass' : required ? 'fail' : 'warn',
+      input.tunnel.auth?.mode === 'oauth'
+        ? (input.tunnel.authReady ? 'OAuth tunnel authentication session is ready' : 'AUTH_REQUIRED: OAuth tunnel authentication requires user action')
+        : (input.tunnel.hasApiKey ? 'Legacy Runtime API key authentication is ready' : 'AUTH_REQUIRED: Runtime API key is not configured'),
+    ),
+    check(
+      'oauth_provisioning_capability',
+      input.tunnel.auth?.mode !== 'oauth' ? 'pass' : input.tunnel.oauth?.available === true ? 'pass' : 'fail',
+      input.tunnel.auth?.mode !== 'oauth'
+        ? 'OAuth provisioning is optional while Runtime API key authentication is active'
+        : input.tunnel.oauth?.available === true
+          ? 'OAuth Tunnel provisioning capability is available'
+          : 'AUTH_REQUIRED: active OAuth mode has no supported Tunnel provisioning backend',
+      input.tunnel.auth?.mode === 'oauth',
+    ),
+    check(
+      'runtime_key_available',
+      (input.tunnel.runtimeCredentialAvailable ?? input.tunnel.authReady ?? input.tunnel.hasApiKey) ? 'pass' : required ? 'fail' : 'warn',
+      (input.tunnel.runtimeCredentialAvailable ?? input.tunnel.authReady ?? input.tunnel.hasApiKey)
+        ? input.tunnel.auth?.mode === 'oauth' ? 'OAuth-backed tunnel runtime credential is available' : 'Runtime API key is available in secure storage'
+        : 'AUTH_REQUIRED: tunnel runtime credential is not available',
+    ),
+  ];
+}
+
+function sameLocalMcpEndpoint(left: string, right: string): boolean {
+  try {
+    const a = new URL(left);
+    const b = new URL(right);
+    const normalizeHost = (host: string): string => host === 'localhost' || host === '::1' || host === '[::1]' ? '127.0.0.1' : host.toLowerCase();
+    return a.protocol === b.protocol && normalizeHost(a.hostname) === normalizeHost(b.hostname) && a.port === b.port && a.pathname.replace(/\/$/, '') === b.pathname.replace(/\/$/, '');
+  } catch {
+    return left.trim() === right.trim();
+  }
+}
+
+async function checkCodex(discovery: CodexDiscovery): Promise<{ readonly status: 'pass' | 'warn'; readonly message: string }> {
+  const result = await discovery.discover();
+  if (!result.ok) return { status: 'warn', message: formatCodexDiscoveryError(result.error) };
+  return result.value.status.installed ? { status: 'pass', message: `Codex ${result.value.status.version ?? 'installed'}` } : { status: 'warn', message: 'Codex is not installed' };
+}
+
+export type McpIdentityProbe = (endpoint: URL) => Promise<boolean>;
+
+export async function checkConfiguredMcpPort(
+  status: McpConnectionStatus,
+  configuredPort: number,
+  identityProbe: McpIdentityProbe = probeLnwjudMcpIdentity,
+): Promise<DoctorProbeResult> {
+  if (status.running && status.url !== null) {
+    try {
+      const endpoint = new URL(status.url);
+      const livePort = Number(endpoint.port);
+      if (!(await identityProbe(endpoint))) {
+        return { status: 'fail', message: `Desktop MCP endpoint failed the lnwjud identity check at ${endpoint.origin}` };
+      }
+      if (configuredPort === 0 || livePort === configuredPort) {
+        return { status: 'pass', message: `lnwjud Desktop MCP identity verified at ${endpoint.origin}${endpoint.pathname}` };
+      }
+      return {
+        status: 'warn',
+        message: `lnwjud Desktop MCP identity verified at fallback port ${livePort}; configured port ${configuredPort} was unavailable`,
+      };
+    } catch {
+      return { status: 'fail', message: `Desktop MCP reported an invalid endpoint: ${status.url}` };
+    }
+  }
+  if (status.lastStartError !== null && status.lastStartError !== undefined) {
+    return { status: 'fail', message: `Desktop MCP failed to start on configured port ${configuredPort}: ${status.lastStartError}` };
+  }
+
+  const server = createServer();
+  let listening = false;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen({ host: '127.0.0.1', port: configuredPort }, () => {
+        listening = true;
+        resolve();
+      });
+    });
+    return { status: 'fail', message: `Desktop MCP is not running; configured port ${configuredPort} is available` };
+  } catch (error: unknown) {
+    const code = typeof error === 'object' && error !== null && 'code' in error ? String(error.code) : 'unknown';
+    const endpoint = new URL(`http://127.0.0.1:${configuredPort}/mcp`);
+    const isLnwjud = await identityProbe(endpoint);
+    return isLnwjud
+      ? { status: 'fail', message: `Configured MCP port ${configuredPort} is owned by an lnwjud listener that this Desktop instance is not managing (${code})` }
+      : { status: 'fail', message: `Configured MCP port ${configuredPort} is occupied by a listener that is not an lnwjud Desktop MCP (${code})` };
+  } finally {
+    if (listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+async function probeLnwjudMcpIdentity(endpoint: URL): Promise<boolean> {
+  const MCP_IDENTITY_PROBE_TIMEOUT_MS = 750;
+  const MCP_IDENTITY_PROBE_MAX_ATTEMPTS = 2;
+  const started = Date.now();
+  const identityUrl = new URL(LNWJUD_MCP_IDENTITY_PATH, endpoint.origin);
+  let lastFailure = 'transport error';
+  for (let attempt = 0; attempt < MCP_IDENTITY_PROBE_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), MCP_IDENTITY_PROBE_TIMEOUT_MS);
+    try {
+      const response = await fetch(identityUrl, {
+        method: 'GET',
+        cache: 'no-store',
+        signal: controller.signal,
+      });
+      if (!response.ok || response.headers.get('x-lnwjud-service') !== 'desktop-mcp') {
+        lastFailure = `unexpected HTTP response (${response.status})`;
+        break;
+      }
+      const body: unknown = await response.json();
+      const matches = typeof body === 'object' && body !== null
+        && 'product' in body && body.product === 'lnwjud'
+        && 'service' in body && body.service === 'desktop-mcp'
+        && 'protocol' in body && body.protocol === 1;
+      if (matches) return true;
+      lastFailure = 'identity document mismatch';
+      break;
+    } catch (error: unknown) {
+      lastFailure = controller.signal.aborted ? 'timeout' : error instanceof SyntaxError ? 'invalid JSON' : 'transport error';
+      if (lastFailure !== 'timeout' && lastFailure !== 'transport error') break;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  console.warn(`[Doctor] MCP identity probe failed: ${lastFailure} after ${Date.now() - started}ms`);
+  return false;
+}
+
+function summarizeLogs(entries: readonly string[]): string {
+  return entries.map(redactDisplayText).join('').trim().slice(-2_000);
+}
+
+function redactDisplayText(value: string): string {
+  return value
+    .replace(/(\bauthorization\s*:\s*bearer\s+)[^\s]+/gi, '$1[redacted]')
+    .replace(/\b(token|secret|password|api[_-]?key|private[_-]?key)\s*[:=]\s*[^\s]+/gi, '$1=[redacted]');
+}
+
+const APPROVAL_TAB_LOOKUP_TIMEOUT_MS = 800;
+
+/**
+ * Adds read-only, presentation-only identity for the exact requested CDP tab.
+ * This deliberately calls the backend directly: routing it through ToolRegistry
+ * would create a second invocation and potentially another approval request.
+ */
+export function createPresentedHostMutationApprovalProvider(
+  provider: NonNullable<DesktopRuntimeOptions['hostMutationApprovalProvider']>,
+  browser: Pick<BrowserCdpBackend, 'listTabsIfRunning'>,
+): NonNullable<DesktopRuntimeOptions['hostMutationApprovalProvider']> {
+  return async (request, context): Promise<boolean> => {
+    const presented = await presentApprovalBrowserTarget(request, browser, context.signal);
+    if (context.signal.aborted) return false;
+    return provider(presented, context);
+  };
+}
+
+async function presentApprovalBrowserTarget(
+  request: HostMutationApprovalRequest,
+  browser: Pick<BrowserCdpBackend, 'listTabsIfRunning'>,
+  parentSignal: AbortSignal,
+): Promise<HostMutationApprovalRequest> {
+  const presentation = request.presentation;
+  if (presentation?.browserTabId === undefined || parentSignal.aborted) return request;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(new Error('approval tab lookup timed out')), APPROVAL_TAB_LOOKUP_TIMEOUT_MS);
+  const abortParent = (): void => controller.abort(new Error('approval cancelled'));
+  parentSignal.addEventListener('abort', abortParent, { once: true });
+  try {
+    const listed = await browser.listTabsIfRunning(controller.signal);
+    if (parentSignal.aborted) return request;
+    if (controller.signal.aborted) return withTabPresentation(request, { browserTabLookup: 'timed_out' });
+    if (!listed.ok || !listed.value.ready) {
+      return withTabPresentation(request, { browserTabLookup: 'unavailable' });
+    }
+    const tab = listed.value.tabs.find((item) => item.id === presentation.browserTabId);
+    if (tab === undefined) return withTabPresentation(request, { browserTabLookup: 'not_found' });
+    return withTabPresentation(request, {
+      browserTabLookup: 'resolved',
+      browserTabTitle: sanitizeApprovalTabTitle(typeof tab.title === 'string' ? tab.title : ''),
+      browserTabUrl: sanitizeApprovalTabUrl(typeof tab.url === 'string' ? tab.url : ''),
+    });
+  } catch {
+    return withTabPresentation(request, { browserTabLookup: controller.signal.aborted ? 'timed_out' : 'unavailable' });
+  } finally {
+    clearTimeout(timer);
+    parentSignal.removeEventListener('abort', abortParent);
+  }
+}
+
+function withTabPresentation(
+  request: HostMutationApprovalRequest,
+  extra: Pick<NonNullable<HostMutationApprovalRequest['presentation']>, 'browserTabLookup'>
+    & Partial<Pick<NonNullable<HostMutationApprovalRequest['presentation']>, 'browserTabTitle' | 'browserTabUrl'>>,
+): HostMutationApprovalRequest {
+  return { ...request, presentation: { ...request.presentation!, ...extra } };
+}
+
+function sanitizeApprovalTabTitle(value: string): string {
+  const clean = value.replace(/\p{Cc}/gu, ' ').replace(/\s+/g, ' ').trim();
+  return clean.length === 0 ? 'ไม่มีชื่อแท็บ' : clean.slice(0, 240);
+}
+
+function sanitizeApprovalTabUrl(value: string): string {
+  try {
+    const parsed = new URL(value);
+    if (parsed.protocol === 'data:') return 'data: URL (ไม่แสดงเนื้อหา)';
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return `${parsed.protocol}// (ไม่แสดงรายละเอียด)`;
+    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`.slice(0, 512);
+  } catch {
+    return 'URL ไม่ถูกต้องหรือไม่แสดง';
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
