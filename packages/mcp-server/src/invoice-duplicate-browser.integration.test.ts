@@ -10,7 +10,7 @@ import {duplicateCheckBrowserProgram} from './invoice-duplicate-check-browser.js
 import {analyzeDuplicateCheck} from './invoice-duplicate-check.js';
 
 type Obj=Record<string,unknown>;
-const chrome='C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
+const chrome=process.env.LNWJUD_REAL_BROWSER_TEST_EXECUTABLE??(process.platform==='win32'?'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe':undefined);
 const invoice={supplier:'สินเกษตร',date:'2026-09-01',bill_ref:'',note:'',rows:[{sku:'Sin-04',quantity:20,unit_cost_cents:49400},{sku:'Sin-02',quantity:60,unit_cost_cents:34700},{sku:'Sin-01',quantity:60,unit_cost_cents:42400}]};
 interface Row {id:number;sku:string;quantity:number;cost:number;status:string;}
 interface Group {date:string;rows:Row[];}
@@ -57,10 +57,11 @@ describe('real Chrome duplicate reader against isolated loopback only',()=>{
  const draftExpression="[...document.querySelectorAll('form input')].map(x=>[x.id,x.name,x.value])";
  async function read():Promise<unknown>{return evaluate(duplicateCheckBrowserProgram({target:target(),supplier:invoice.supplier,date:invoice.date,rows:invoice.rows}));}
  beforeAll(async()=>{
+  if(chrome===undefined)throw Error('LNWJUD_REAL_BROWSER_TEST_EXECUTABLE is required for the owned browser fixture');
   profile=await mkdtemp(path.join(os.tmpdir(),'panya-dupe-cdp-'));
   server=createServer((req,res)=>{const u=new URL(req.url??'/',origin??'http://127.0.0.1');requests.push({method:req.method??'',url:u.pathname+u.search});res.setHeader('content-type','text/html; charset=utf-8');if(req.method!=='GET'){res.statusCode=405;res.end();return;}if(u.pathname==='/movements'){const k=u.searchParams.get('sourceId')+':'+u.searchParams.get('page'),count=(counts.get(k)??0)+1;counts.set(k,count);res.end(historyHtml(u,mode,count>1));}else res.end(formHtml(mode));});
   origin='http://127.0.0.1:'+await listen(server);const cdpPort=await unusedPort();
-  browser=spawn(chrome,['--headless=new','--enable-automation','--no-first-run','--no-default-browser-check',`--user-data-dir=${profile}`,`--remote-debugging-port=${cdpPort}`,'about:blank'],{shell:false,windowsHide:true,stdio:'ignore'});
+  browser=spawn(chrome,['--headless=new','--enable-automation','--no-first-run','--no-default-browser-check',`--user-data-dir=${profile}`,`--remote-debugging-port=${cdpPort}`,'about:blank'],{shell:false,windowsHide:true,detached:process.platform!=='win32',stdio:'ignore'});
   protocol=new NodeBrowserCdpProtocol({port:cdpPort,chromeExecutable:chrome});await until(async()=>{try{return(await protocol.status()).ready;}catch{return false;}});
   tabId=(await protocol.newTab('about:blank')).id;
  },30000);

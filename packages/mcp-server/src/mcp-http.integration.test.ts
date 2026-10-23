@@ -3,7 +3,7 @@ import { ok } from '@lnwjud/domain';
 import type { ToolAvailabilitySnapshot } from '@lnwjud/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ActivityTracker } from './activity-tracker.js';
-import { ToolRegistry, type McpApplicationServices } from './tool-registry.js';
+import { ToolRegistry, isCodexDelegationTool, type McpApplicationServices } from './tool-registry.js';
 import { BUNDLED_PONYTAIL_SKILL_ID } from './ponytail-runtime.js';
 import { LNWJUD_MCP_IDENTITY_PATH, startMcpHttp, type McpHttpServerHandle } from './http.js';
 
@@ -57,7 +57,8 @@ describe('MCP localhost HTTP transport', () => {
       const second = await client.listTools();
 
       expect(first.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
-      expect(first.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(first.tools.some((tool) => isCodexDelegationTool(tool.name))).toBe(false);
+      expect(first.tools.map((tool) => tool.name)).toContain('codex_rules');
       expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
     } finally {
       await client.close();
@@ -424,7 +425,8 @@ describe('MCP localhost HTTP transport', () => {
       expect(transport.sessionId).toEqual(expect.any(String));
       const tools = await client.listTools();
       expect(tools.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
-      expect(tools.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(tools.tools.some((tool) => isCodexDelegationTool(tool.name))).toBe(false);
+      expect(tools.tools.map((tool) => tool.name)).toContain('codex_rules');
 
       const first = await client.callTool({ name: 'workspace_list', arguments: {} });
       const second = await client.callTool({ name: 'workspace_list', arguments: {} });

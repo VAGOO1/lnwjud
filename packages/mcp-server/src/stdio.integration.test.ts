@@ -12,7 +12,7 @@ import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { MODERN_TASKS_EXTENSION_ID } from './modern-tasks-protocol.js';
-import { ToolRegistry } from './tool-registry.js';
+import { ToolRegistry, isCodexDelegationTool } from './tool-registry.js';
 
 const MODERN_PROTOCOL_VERSION = '2026-07-28';
 const expectedAdvertisedToolCount = new ToolRegistry({}, { clientId: 'count-test', clientName: 'count-test' }).list().length;
@@ -107,7 +107,8 @@ describe('MCP stdio transport', () => {
       const second = await client.listTools();
 
       expect(first.tools.map((tool) => tool.name)).toHaveLength(expectedAdvertisedToolCount);
-      expect(first.tools.some((tool) => tool.name.startsWith('codex_'))).toBe(false);
+      expect(first.tools.some((tool) => isCodexDelegationTool(tool.name))).toBe(false);
+      expect(first.tools.map((tool) => tool.name)).toContain('codex_rules');
       expect(second.tools.map((tool) => tool.name)).toEqual(first.tools.map((tool) => tool.name));
       expect(client.getServerCapabilities()?.tasks).toBeUndefined();
       expect(client.getServerCapabilities()?.extensions?.[MODERN_TASKS_EXTENSION_ID]).toEqual({});

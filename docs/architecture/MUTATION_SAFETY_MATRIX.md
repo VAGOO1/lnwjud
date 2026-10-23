@@ -94,6 +94,16 @@ Full Bypass does not disable schema/input validation, existence checks, task/pro
 
 `tasks/result`-style waiting never restarts the payload. Durable shell metadata retries are read/settlement retries only. Codex `autoRetry` is limited to terminating the same already-created process when a cancellation races launch; it never retries Codex start.
 
+### 6a. Exact Codex rules file workflow
+
+**Covered tools:** `codex_rules`.
+
+This host-global exact-file workflow is independent from optional Codex child-agent delegation. Every operation requires trusted Desktop native approval, including under Full Bypass. The derived CODEX_HOME target, owner/session, current bytes, snapshot and backup identities stay bound; caller-supplied authorization cannot replace the host proof.
+
+| Mutation kind | Chat confirmation | Host approval | Recoverable | Auto-approvable | Active Project | Command policy | Packaged transports |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `backup_apply` and `rollback` replace one exact instruction file; inspect/probe operations remain approval-gated execution | explicit contract confirmation | always trusted native approval; Full Bypass cannot authorize it | owner-bound one-use snapshot, hash/CAS and durable backup receipt; changed targets fail closed | none | host-global approved exact target; workspace source reads stay scoped | only typed operations and exact identities; a fresh probe owns its new session | Desktop native approval provider required; missing services fail truthfully |
+
 ### 7. Mixed native desktop/UI/media capabilities
 
 **Covered tools:** `dom_cdp`, `computer_use`, `input_event`, `ui_target_action`, `window`, `notification`, `file_dialog`, `clipboard`, `audio`, `screen_record`.
