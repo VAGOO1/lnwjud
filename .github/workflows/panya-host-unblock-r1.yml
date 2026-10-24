@@ -112,7 +112,7 @@ jobs:
             source_commit_sha = $env:GITHUB_SHA
             approved_baseline_commit = '624eb101cf2d84843e620b50b77753f5de84dff7'
             pinned_upstream_commit = '1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b'
-            workflow_path = '.github/workflows/panya-native-helper-ci.yml'
+            workflow_path = '.github/workflows/panya-host-unblock-r1.yml'
             run_id = $env:GITHUB_RUN_ID
             run_attempt = $env:GITHUB_RUN_ATTEMPT
             runner_os = $env:RUNNER_OS
