@@ -1,0 +1,35 @@
+name: PANYA Host R12 Stale-Boot Staging (Never Live)
+
+on:
+  push:
+    branches:
+      - 'panya/host-recovery-r12-staging-20261024'
+    paths:
+      - 'tests/panya-r12/**'
+      - '.github/workflows/panya-host-r12-staging.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pure-recovery-preview:
+    if: github.repository == 'VAGOO1/lnwjud' && github.ref == 'refs/heads/panya/host-recovery-r12-staging-20261024'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout staging revision only
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Verify staging boundary
+        shell: pwsh
+        run: |
+          Write-Output 'STAGING_ONLY_NO_HOST_ACCESS'
+      - name: Test ten deterministic fail-closed scenarios
+        shell: pwsh
+        run: node --test tests/panya-r12/stale-recovery-plan.test.mts
