@@ -111,3 +111,22 @@ test('12 malformed process liveness state is denied rather than assuming absent'
   const unknown = { pid: 50000, currentBootId: 'boot-after', state: 'alive_or_new_value', trusted: true };
   assert.equal(one(fixture({ processObservations: [unknown as PreviewInput['processObservations'][number]] })).reason, 'PROCESS_STATE_UNRECOGNIZED');
 });
+test('13 string false flags from untrusted JSON cannot authorize any candidate', () => {
+  assert.equal(one(fixture({ boot: { ...fixture().boot, trusted: 'false' as unknown as boolean } })).decision, 'HOLD');
+  assert.equal(one(fixture({ review: { ...fixture().review, ownerApprovedRecorded: 'false' as unknown as boolean } })).decision, 'HOLD');
+  const forgedProbe = { ...fixture().processObservations[0], trusted: 'false' as unknown as boolean };
+  assert.equal(one(fixture({ processObservations: [forgedProbe] })).decision, 'HOLD');
+});
+
+test('14 invalid journal phase from persisted input must HOLD without throwing', () => {
+  const bad = { phase: 'FORGED_PHASE' as 'NOT_STARTED', revision: 0, admissionOpen: false as const };
+  const result = advanceStagingJournal(bad, 0, 'acquire_barrier');
+  assert.equal(result.phase, 'HOLD');
+  assert.equal(result.admissionOpen, false);
+});
+
+test('15 negative and unsafe journal revisions must HOLD', () => {
+  const bad = { phase: 'NOT_STARTED' as const, revision: -1, admissionOpen: false as const };
+  assert.equal(advanceStagingJournal(bad, -1, 'acquire_barrier').reason, 'INVALID_JOURNAL_REVISION');
+  assert.equal(advanceStagingJournal({ ...bad, revision: Number.MAX_SAFE_INTEGER }, Number.MAX_SAFE_INTEGER, 'acquire_barrier').phase, 'HOLD');
+});

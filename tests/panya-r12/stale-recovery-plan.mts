@@ -99,10 +99,10 @@ export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
   for (const item of input.processObservations) proofCounts.set(item.pid, (proofCounts.get(item.pid) ?? 0) + 1);
 
   const boot = input.boot;
-  const trustedBoot = boot.trusted && boot.source === 'native_os_boot_and_process_identity' &&
+  const trustedBoot = boot.trusted === true && boot.source === 'native_os_boot_and_process_identity' &&
     nonempty(boot.hostId) && nonempty(boot.previousBootId) && nonempty(boot.currentBootId) &&
     boot.previousBootId !== boot.currentBootId && finiteTime(boot.rebootAtMs);
-  const reviewed = input.review.ownerApprovedRecorded && input.review.scope === 'staging_only' &&
+  const reviewed = input.review.ownerApprovedRecorded === true && input.review.scope === 'staging_only' &&
     nonempty(input.review.reviewedBy) && nonempty(input.targetWorkspaceId);
 
   const decisions: PreviewDecision[] = input.entries.map(entry => {
@@ -134,7 +134,7 @@ export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
     }
     if (proofCounts.get(entry.pid!) !== 1) return hold('PROCESS_PROBE_NOT_UNIQUE');
     const probe = input.processObservations.find(p => p.pid === entry.pid);
-    if (!probe?.trusted || probe.currentBootId !== boot.currentBootId) return hold('CURRENT_PROCESS_PROOF_MISSING');
+    if (probe?.trusted !== true || probe.currentBootId !== boot.currentBootId) return hold('CURRENT_PROCESS_PROOF_MISSING');
     if (probe.state !== 'absent' && probe.state !== 'reused_pid' &&
         probe.state !== 'same_process' && probe.state !== 'unknown') {
       return hold('PROCESS_STATE_UNRECOGNIZED');
@@ -178,6 +178,11 @@ export interface JournalSnapshot {
 export function advanceStagingJournal(
   current: JournalSnapshot, expectedRevision: number, event: JournalEvent,
 ): JournalSnapshot {
+  if (!Number.isSafeInteger(current.revision) || current.revision < 0 ||
+      current.revision >= Number.MAX_SAFE_INTEGER ||
+      !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+    return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'INVALID_JOURNAL_REVISION' };
+  }
   if (current.revision !== expectedRevision) return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'CAS_REVISION_CONFLICT' };
   if (event === 'fault') return { phase: 'HOLD', revision: current.revision + 1, admissionOpen: false, reason: 'FAULT_REQUIRES_MANUAL_RECONCILIATION' };
   const transition: Record<Exclude<JournalPhase, 'HOLD'>, Partial<Record<JournalEvent, JournalPhase>>> = {
@@ -187,7 +192,9 @@ export function advanceStagingJournal(
     LEDGER_FENCED: { verify_independently: 'INDEPENDENTLY_VERIFIED' },
     INDEPENDENTLY_VERIFIED: {},
   };
-  const next = current.phase === 'HOLD' ? undefined : transition[current.phase][event];
+  const next = current.phase === 'HOLD' ||
+    !Object.prototype.hasOwnProperty.call(transition, current.phase)
+    ? undefined : transition[current.phase][event];
   if (!next) return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'INVALID_OR_REPEATED_TRANSITION' };
   return { phase: next, revision: current.revision + 1, admissionOpen: false };
 }

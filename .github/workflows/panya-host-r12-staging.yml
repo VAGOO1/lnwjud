@@ -30,6 +30,6 @@ jobs:
         shell: pwsh
         run: |
           Write-Output 'STAGING_ONLY_NO_HOST_ACCESS'
-      - name: Test ten deterministic fail-closed scenarios
+      - name: Test fifteen deterministic fail-closed scenarios
         shell: pwsh
         run: node --test tests/panya-r12/stale-recovery-plan.test.mts
