@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - panya/host-unblock-r1-20261024
+  workflow_call:
 
 permissions:
   contents: read
