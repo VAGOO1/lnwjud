@@ -1,3 +1,5 @@
+import { types as nodeTypes } from 'node:util';
+
 /**
  * PANYA R12 — STAGING ONLY. Read-only candidate for planning recovery after a
  * verified Windows reboot. This module cannot release a writer lease, reserve
@@ -102,7 +104,7 @@ function snapshotOwnData(raw: unknown): unknown | typeof MALFORMED {
     if (++nodes > 20000 || depth > 12) return MALFORMED;
     if (value === null || value === undefined || typeof value === 'string' ||
         typeof value === 'number' || typeof value === 'boolean') return value;
-    if (typeof value !== 'object' || visited.has(value)) return MALFORMED;
+    if (typeof value !== 'object' || nodeTypes.isProxy(value) || visited.has(value)) return MALFORMED;
     visited.add(value);
     const array = Array.isArray(value);
     const prototype = Object.getPrototypeOf(value);
