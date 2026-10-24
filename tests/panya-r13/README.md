@@ -6,7 +6,7 @@ R13 builds on the independently reviewed R12 pure preview and provides:
 
 - `previewR13SyntheticManifest(JSON text)` — a bounded, read-only classification of marker evidence, including marker filename binding `sha256(taskId)`, canonical source bytes, exact source hash, record kind, digest, owner workspace/client, and *claimed* boot/process identities. Every record retains `UNKNOWN_UNVERIFIED` for Native completion and `canReleaseReservation=false`.
 - `simulateR13QuarantineAudit(item, JSON events)` — a hash-chained **in-memory simulation** of four ordered review stages; it does not acquire a lock, archive anything, commit a database, verify a Native Job or grant live authority.
-- Thirty deterministic R13 regression tests, plus twenty-eight existing R12 tests, runnable on isolated Windows GitHub runner. No live data or secrets are shipped.
+- Thirty-four deterministic R13 regression tests, plus twenty-eight existing R12 tests, runnable on isolated Windows GitHub runner. No live data or secrets are shipped.
 
 ## Crucial evidence boundary
 
@@ -23,3 +23,5 @@ Node.js 22: `node --experimental-strip-types --test tests/panya-r13/manifest-pre
 Node.js 24: `node --test tests/panya-r12/stale-recovery-plan.test.mts tests/panya-r13/manifest-preflight.test.mts`
 
 CI is scoped to the exact R13 branch and GitHub Windows runner with read-only token, no deployment step, no downloads of real Host backups and no merging to `main` or `dev`.
+
+R13 v1.1 reviewer follow-up: canonical JSON is required for the outer manifest and audit events as well as each raw marker; duplicate object keys, ambiguous whitespace and recursive JSON canonicalization failure all return HOLD. These remain synthetic internal checks, never native attestation or release permission.
