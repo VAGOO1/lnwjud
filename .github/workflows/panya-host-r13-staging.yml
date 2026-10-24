@@ -1,0 +1,35 @@
+name: PANYA R13 Synthetic Per-Marker Evidence (Never Live)
+
+on:
+  push:
+    branches:
+      - 'panya/host-recovery-r13-staging-20261024'
+    paths:
+      - 'tests/panya-r13/**'
+      - 'tests/panya-r12/**'
+      - '.github/workflows/panya-host-r13-staging.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  isolated-evidence-review:
+    if: github.repository == 'VAGOO1/lnwjud' && github.ref == 'refs/heads/panya/host-recovery-r13-staging-20261024'
+    runs-on: windows-latest
+    timeout-minutes: 12
+    steps:
+      - name: Checkout pinned staging revision without persisted credentials
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Set up Node 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+      - name: Prove no installed Host access
+        shell: pwsh
+        run: Write-Output 'R13_STAGING_SYNTHETIC_ONLY_NO_HOST_ACCESS'
+      - name: Run R12 and R13 isolated Node tests
+        shell: pwsh
+        run: node --test tests/panya-r12/stale-recovery-plan.test.mts tests/panya-r13/manifest-preflight.test.mts
