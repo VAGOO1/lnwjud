@@ -194,3 +194,53 @@ test('21 no current process evidence or non-boolean approval can ever grant elig
   const b = fixture({ review: { ...fixture().review, ownerApprovedRecorded: 'false' as unknown as boolean } });
   assert.equal(previewStaleAfterReboot(b).eligibleCount, 0);
 });
+
+
+test('22 inherited ownership and process identity are never accepted as record evidence', () => {
+  const spoofed = Object.assign(Object.create({ ownerClientId: entry.ownerClientId,
+    pid: entry.pid, originBootId: entry.originBootId,
+    processStartedAtMs: entry.processStartedAtMs, fingerprintSha256: entry.fingerprintSha256 }),
+    { id: entry.id, kind: entry.kind, hostId: entry.hostId,
+      workspaceId: entry.workspaceId, recordedAtMs: entry.recordedAtMs });
+  const result = previewStaleAfterReboot(fixture({ entries: [spoofed] }));
+  assert.equal(result.eligibleCount, 0);
+  assert.equal(result.decisions[0].decision, 'HOLD');
+});
+
+test('23 a sparse array is rejected before any iteration can throw', () => {
+  const result = previewStaleAfterReboot(fixture({ entries: new Array(1) as RecoveryEntry[] }));
+  assert.equal(result.eligibleCount, 0);
+  assert.equal(result.decisions[0].reason, 'MALFORMED_PREVIEW_INPUT');
+});
+
+test('24 accessor-backed evidence is rejected without evaluating getters', () => {
+  let calls = 0;
+  const object = { ...entry };
+  Object.defineProperty(object, 'ownerClientId', { enumerable: true,
+    get() { calls++; return 'client-a'; } });
+  const result = previewStaleAfterReboot(fixture({ entries: [object] }));
+  assert.equal(result.eligibleCount, 0);
+  assert.equal(calls, 0);
+  assert.equal(result.decisions[0].decision, 'HOLD');
+});
+
+test('25 journal rejects inherited and accessor fields without invoking getters', () => {
+  const inherited = Object.create({ phase: 'NOT_STARTED', revision: 0, admissionOpen: false });
+  assert.equal(advanceStagingJournal(inherited, 0, 'acquire_barrier').phase, 'HOLD');
+  let calls = 0;
+  const accessor = { phase: 'NOT_STARTED', revision: 0, admissionOpen: false };
+  Object.defineProperty(accessor, 'phase', { enumerable: true,
+    get() { calls++; return 'NOT_STARTED'; } });
+  assert.equal(advanceStagingJournal(accessor, 0, 'acquire_barrier').phase, 'HOLD');
+  assert.equal(calls, 0);
+});
+
+test('26 cyclic, proxy-like and sparse owner input fails closed without partial pass', () => {
+  const cyclic: Record<string, unknown> = { ...entry };
+  cyclic.self = cyclic;
+  assert.equal(previewStaleAfterReboot(fixture({ entries: [entry, cyclic as RecoveryEntry] })).eligibleCount, 0);
+  const broken = new Proxy({ ...entry }, { ownKeys() { throw Error('PROXY_TRAP_DENIED'); } });
+  const result = previewStaleAfterReboot(fixture({ entries: [broken] }));
+  assert.equal(result.decisions[0].decision, 'HOLD');
+  assert.equal(result.canMutateLive, false);
+});
