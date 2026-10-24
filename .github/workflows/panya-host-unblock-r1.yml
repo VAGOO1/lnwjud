@@ -1,0 +1,277 @@
+# PANYA R4 isolated GitHub CI: Native/Writer/Receipt proof only. No deployed runtime or Host mutation.
+name: PANYA Host Unblock R1 Windows Staging
+on:
+  push:
+    branches:
+      - panya/host-unblock-r1-20261024
+
+permissions:
+  contents: read
+
+concurrency:
+  group: panya-host-unblock-r1
+  cancel-in-progress: false
+
+jobs:
+  native-helper:
+    needs: integration-contracts
+    if: github.repository == 'VAGOO1/lnwjud'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate exact trusted baseline
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'WRONG_BRANCH' }
+          git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
+          if ((git status --porcelain).Length -gt 0) { throw 'DIRTY_CHECKOUT' }
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '8.0.x'
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Set up pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install frozen dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+      - name: Build native helper in disposable CI stage
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = Join-Path $env:RUNNER_TEMP 'PANYA_LNWJUD_NATIVE_LAUNCHER_REPAIR_R1_20261017'
+          $bin = Join-Path $stage 'build\win-x64'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          dotnet publish native/windows-containment-helper/lnwjud-windows-containment-helper.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o $bin
+          if ($LASTEXITCODE -ne 0) { throw 'NATIVE_BUILD_FAILED' }
+          $helper = Join-Path $bin 'lnwjud-windows-containment-helper.exe'
+          if (-not (Test-Path -LiteralPath $helper -PathType Leaf)) { throw 'NATIVE_BINARY_MISSING' }
+          $sha = (Get-FileHash -LiteralPath $helper -Algorithm SHA256).Hash.ToLowerInvariant()
+          "PANYA_NATIVE_STAGE_TEST_ROOT=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PANYA_NATIVE_RELEASE_SHA256=$sha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "PANYA_NATIVE_HELPER_SHA256=$sha"
+          "Native Helper executable SHA-256: $sha" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+      - name: Native tests under process-scoped Restricted PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $winps = Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+          $policy = & $winps -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command '(Get-ExecutionPolicy).ToString()'
+          if (($policy | Out-String).Trim() -ne 'Restricted') { throw 'RESTRICTED_POLICY_NOT_PROVEN' }
+          $env:PANYA_NATIVE_HELPER_TEST_GATE = 'HOST_ADMITTED_NATIVE_EXECUTION'
+          $nodeExe = (Get-Command node.exe).Source
+          $vitest = Join-Path $env:GITHUB_WORKSPACE 'node_modules\vitest\vitest.mjs'
+          if (-not (Test-Path -LiteralPath $vitest -PathType Leaf)) { throw 'VITEST_ENTRY_MISSING' }
+          $command = '& "' + $nodeExe + '" "' + $vitest + '" run tests/windows-native-helper.acceptance.test.ts --reporter=verbose'
+          & $winps -NoProfile -NonInteractive -ExecutionPolicy Restricted -Command $command
+          if ($LASTEXITCODE -ne 0) { throw 'RESTRICTED_NATIVE_ACCEPTANCE_FAILED' }
+
+      - name: Package R4 native helper artifact and verify hashes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud') { throw 'R4_WRONG_REPOSITORY' }
+          if ($env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'R4_WRONG_BRANCH' }
+          if (-not $env:RUNNER_TEMP -or -not $env:GITHUB_ENV -or -not $env:PANYA_NATIVE_STAGE_TEST_ROOT) { throw 'R4_STAGE_ENV_MISSING' }
+          $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
+          $stage = (Resolve-Path -LiteralPath $env:PANYA_NATIVE_STAGE_TEST_ROOT -ErrorAction Stop).ProviderPath
+          if (-not $stage.StartsWith(($runnerTemp.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw 'R4_STAGE_OUTSIDE_RUNNER_TEMP' }
+          $payload = Join-Path $stage 'artifact-r4'
+          if (Test-Path -LiteralPath $payload) { throw 'R4_ARTIFACT_ROOT_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $payload -ErrorAction Stop | Out-Null
+          $exeName = 'lnwjud-windows-containment-helper.exe'
+          $exeSource = Join-Path $stage ('build\win-x64\' + $exeName)
+          $licenseSource = Join-Path $env:GITHUB_WORKSPACE 'LICENSE'
+          if (-not (Test-Path -LiteralPath $exeSource -PathType Leaf) -or -not (Test-Path -LiteralPath $licenseSource -PathType Leaf)) { throw 'R4_INPUT_MISSING' }
+          $sourceSha = (Get-FileHash -LiteralPath $exeSource -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($sourceSha -cne $env:PANYA_NATIVE_RELEASE_SHA256) { throw 'R4_BUILD_SHA_MISMATCH' }
+          Copy-Item -LiteralPath $exeSource -Destination $payload -ErrorAction Stop
+          Copy-Item -LiteralPath $licenseSource -Destination $payload -ErrorAction Stop
+          $exeOutput = Join-Path $payload $exeName
+          $licenseOutput = Join-Path $payload 'LICENSE'
+          $binarySha = (Get-FileHash -LiteralPath $exeOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+          $licenseSha = (Get-FileHash -LiteralPath $licenseOutput -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($binarySha -cne $sourceSha) { throw 'R4_COPIED_BINARY_SHA_MISMATCH' }
+          if ($licenseSha -cne (Get-FileHash -LiteralPath $licenseSource -Algorithm SHA256).Hash.ToLowerInvariant()) { throw 'R4_LICENSE_SHA_MISMATCH' }
+          $metadata = [ordered]@{
+            schema = 'panya-native-helper-ci-artifact-r4/v1'
+            repository = $env:GITHUB_REPOSITORY
+            source_branch = $env:GITHUB_REF_NAME
+            source_commit_sha = $env:GITHUB_SHA
+            approved_baseline_commit = '624eb101cf2d84843e620b50b77753f5de84dff7'
+            pinned_upstream_commit = '1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b'
+            workflow_path = '.github/workflows/panya-native-helper-ci.yml'
+            run_id = $env:GITHUB_RUN_ID
+            run_attempt = $env:GITHUB_RUN_ATTEMPT
+            runner_os = $env:RUNNER_OS
+            binary_filename = $exeName
+            binary_sha256 = $binarySha
+            license = 'MIT'
+            license_filename = 'LICENSE'
+            license_sha256 = $licenseSha
+            ci_test_context = 'GITHUB_CI_R4: integration-contracts passed (P1 Host 8, Writer 6, Launcher 14); Native helper 5 under Restricted'
+            permitted_use = 'STAGING_ONLY_NOT_FOR_LIVE_DEPLOY'
+            release_signed = $false
+            host_5090_verified = $false
+          }
+          $manifestPath = Join-Path $payload 'provenance.json'
+          $metadata | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $manifestPath -Encoding utf8 -ErrorAction Stop
+          $readback = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+          if ($readback.binary_sha256 -cne $binarySha -or $readback.source_commit_sha -cne $env:GITHUB_SHA -or $readback.permitted_use -cne 'STAGING_ONLY_NOT_FOR_LIVE_DEPLOY') { throw 'R4_MANIFEST_READBACK_MISMATCH' }
+          $manifestSha = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          $sumsPath = Join-Path $payload 'SHA256SUMS.txt'
+          @(
+            "$binarySha  $exeName"
+            "$licenseSha  LICENSE"
+            "$manifestSha  provenance.json"
+          ) | Set-Content -LiteralPath $sumsPath -Encoding utf8 -ErrorAction Stop
+          if (@(Get-ChildItem -LiteralPath $payload -File -ErrorAction Stop).Count -ne 4) { throw 'R4_ARTIFACT_FILE_COUNT_MISMATCH' }
+          "PANYA_NATIVE_R4_ARTIFACT_ROOT=$payload" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output "R4_HELPER_SHA256=$binarySha"
+          Write-Output "R4_PROVENANCE_SHA256=$manifestSha"
+          Write-Output "R4_ARTIFACT_FILES=4"
+
+      - name: Upload R4 isolated artifact (no deployment)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: panya-native-runner-r4-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.PANYA_NATIVE_R4_ARTIFACT_ROOT }}/*
+          if-no-files-found: error
+          retention-days: 14
+
+  integration-contracts:
+    if: github.repository == 'VAGOO1/lnwjud'
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout isolated branch
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate exact trusted baseline
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'WRONG_BRANCH' }
+          git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
+          if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
+      - name: Set up Node 24
+        uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Set up pnpm 10.15.0
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        with:
+          version: 10.15.0
+          run_install: false
+      - name: Install frozen dependencies
+        shell: pwsh
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck integration
+        shell: pwsh
+        run: pnpm typecheck
+      - name: Admit R2 isolated integration fixture root
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:RUNNER_TEMP -or -not $env:GITHUB_ENV) { throw 'CI_STAGE_CONTEXT_MISSING' }
+          $stageName = 'PANYA_LNWJUD_NATIVE_LAUNCHER_REPAIR_R1_20261017'
+          $parent = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
+          if (-not [IO.Path]::IsPathFullyQualified($parent)) { throw 'CI_STAGE_PARENT_INVALID' }
+          $stage = Join-Path $parent $stageName
+          if (Test-Path -LiteralPath $stage) { throw 'CI_STAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $stage -ErrorAction Stop | Out-Null
+          $item = Get-Item -LiteralPath $stage -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'CI_STAGE_ROOT_UNSAFE' }
+          $resolved = (Resolve-Path -LiteralPath $stage -ErrorAction Stop).ProviderPath
+          if ($item.Name -cne $stageName -or $resolved -ine [IO.Path]::GetFullPath($stage)) { throw 'CI_STAGE_ROOT_MISMATCH' }
+          "PANYA_NATIVE_STAGE_TEST_ROOT=$resolved" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Admit R4 P1 CI staging source fixture
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_CI_IDENTITY_NOT_ADMITTED' }
+          git merge-base --is-ancestor 624eb101cf2d84843e620b50b77753f5de84dff7 HEAD
+          if ($LASTEXITCODE -ne 0 -or -not $env:RUNNER_TEMP -or -not $env:GITHUB_WORKSPACE) { throw 'R4_BASELINE_OR_RUNNER_UNVERIFIED' }
+          $parent = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
+          $root = Join-Path $parent 'P1_20261017'
+          if (Test-Path -LiteralPath $root) { throw 'R4_P1_FIXTURE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R4_P1_ROOT_UNSAFE' }
+          if ((Resolve-Path -LiteralPath $root).ProviderPath -ine [IO.Path]::GetFullPath($root)) { throw 'R4_P1_ROOT_PATH_MISMATCH' }
+          $allowlist = @(
+            'packages/process/src/native-helper-release.ts',
+            'packages/process/src/process-manager.ts',
+            'packages/capabilities/src/shared-managed-writer-admission.ts',
+            'packages/capabilities/src/durable-shell-task-index.ts',
+            'packages/capabilities/src/durable-shell-task-store.ts',
+            'apps/desktop/src/main/desktop-services.ts',
+            'apps/cli/src/runtime/stdio-mcp-runtime.ts',
+            'packages/capabilities/src/platform-capability-set.ts',
+            'native/windows-containment-helper/Program.cs',
+            'native/windows-containment-helper/ContainedProcess.cs',
+            'packages/process/src/windows-contained-launch.ts'
+          )
+          if ($allowlist.Count -ne 11) { throw 'R4_STAGE_ALLOWLIST_CHANGED' }
+          foreach ($relative in $allowlist) {
+            $src = Join-Path $env:GITHUB_WORKSPACE ($relative.Replace('/', '\'))
+            $dst = Join-Path $root ($relative.Replace('/', '\'))
+            $srcInfo = Get-Item -LiteralPath $src -Force -ErrorAction Stop
+            if ($srcInfo.PSIsContainer -or ($srcInfo.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R4_INPUT_REPARSE_REJECTED' }
+            New-Item -ItemType Directory -Path (Split-Path $dst -Parent) -Force -ErrorAction Stop | Out-Null
+            Copy-Item -LiteralPath $src -Destination $dst -ErrorAction Stop
+            if ((Get-FileHash -LiteralPath $src -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash) { throw 'R4_STAGE_SOURCE_HASH_MISMATCH' }
+          }
+          'R4_P1_FIXTURE_COUNT=11'
+          'R4_PROOF_BOUNDARY=GITHUB_RUNNER_ONLY_NOT_5090'
+      - name: Run R4 P1 Host and Writer tests under GitHub CI isolation
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_P1_HOST_CI_GATE_DENIED' }
+          $root = Join-Path $env:RUNNER_TEMP 'P1_20261017'
+          $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R4_P1_FIXTURE_INVALID' }
+          if ((Resolve-Path -LiteralPath $root).ProviderPath -ine [IO.Path]::GetFullPath($root)) { throw 'R4_P1_REALPATH_MISMATCH' }
+          $env:PANYA_NATIVE_STAGE_TEST_ROOT = $root
+          $env:PANYA_P1_TEST_GATE = 'HOST_ADMITTED_P1_SOURCE_TEST'
+          pnpm exec vitest run tests/P1-host-integration.static-contract.test.ts tests/P1-native-writer-contract.test.ts --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R4_P1_CONTRACTS_FAIL' }
+          'R4_P1_CI_ONLY_14_CONTRACTS_PASS'
+      - name: Run R4 Windows native launcher static negative contracts
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:PANYA_P1_TEST_GATE) { throw 'R4_P1_GATE_ESCAPED_CI_STEP' }
+          pnpm exec vitest run tests/windows-contained-launch.native-contract.test.ts --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R4_NATIVE_STATIC_FAIL' }
+
+      - name: R1 isolated Writer Lease, Global Reservation, recovery and rollback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R1_RUNNER_IDENTITY_DENIED' }
+          if (-not $env:RUNNER_TEMP) { throw 'R1_RUNNER_TEMP_MISSING' }
+          $root = Join-Path $env:RUNNER_TEMP 'PANYA_HOST_UNBLOCK_R1_20261024'
+          if (Test-Path -LiteralPath $root) { throw 'R1_STAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R1_STAGE_REPARSE_DENIED' }
+          $env:PANYA_HOST_UNBLOCK_R1_ROOT = $root
+          $env:PANYA_HOST_UNBLOCK_R1_GATE = 'WINDOWS_CI_STAGING_ONLY'
+          pnpm exec vitest run tests/panya-host-unblock-r1.staging.test.ts --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R1_ISOLATED_CONTRACTS_FAIL' }
+          'R1_WINDOWS_FIXTURE_TESTS_COMPLETED_NO_HOST_MUTATION'
