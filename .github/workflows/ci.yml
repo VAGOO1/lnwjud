@@ -19,6 +19,7 @@ concurrency:
 
 jobs:
   native-platform-contract:
+    if: github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     name: Native Platform Contract (${{ matrix.name }})
     strategy:
       fail-fast: false
@@ -117,6 +118,7 @@ jobs:
         run: bash tests/packaging/linux-release-layout.sh
 
   desktop-test-shards:
+    if: github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     name: Desktop Test Shard (${{ matrix.name }}, ${{ matrix.shard_index }}/${{ matrix.shard_total }})
     timeout-minutes: 20
     strategy:
@@ -183,7 +185,7 @@ jobs:
     # Build target-native artifacts alongside the test matrix on main. The
     # release workflow accepts artifacts only from a successful exact-SHA CI
     # run, so test failures still prevent publication.
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     strategy:
       fail-fast: false
       matrix:
@@ -415,7 +417,7 @@ jobs:
 
   macos-26-package-compatibility:
     name: macOS 26 Package Compatibility (${{ matrix.arch }})
-    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
+    if: ((github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     needs: native-package-verification
     strategy:
       fail-fast: false
@@ -628,7 +630,7 @@ jobs:
 
   windows-release-tests:
     name: Windows Workspace Release Tests
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     runs-on: windows-latest
 
     steps:
@@ -674,7 +676,7 @@ jobs:
   windows-release-build:
     # Direct non-main pushes already run the native platform contract matrix;
     # keep this portable gate for PRs, main, and explicit manual dispatches.
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+    if: (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch') && github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     name: Windows Release Build and Checks
     runs-on: windows-latest
 
@@ -816,7 +818,7 @@ jobs:
     # Preserve the branch-protection check name. Both Windows jobs must pass
     # before this required status can succeed or a release can use the run.
     name: Authoritative Release Verification (Windows)
-    if: always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')
+    if: (always() && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch')) && github.ref != 'refs/heads/panya/host-unblock-r1-20261024'
     needs: [windows-release-tests, windows-release-build]
     runs-on: ubuntu-24.04
     steps:
@@ -827,3 +829,10 @@ jobs:
         run: |
           test "$WORKSPACE_TESTS_RESULT" = success
           test "$BUILD_RESULT" = success
+
+  panya-host-unblock-r1:
+    name: PANYA Host Unblock R1 (isolated Windows only)
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/panya/host-unblock-r1-20261024' && github.repository == 'VAGOO1/lnwjud'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/panya-native-helper-ci.yml
