@@ -1,15 +1,15 @@
 # PANYA R4 isolated GitHub CI: Native/Writer/Receipt proof only. No deployed runtime or Host mutation.
-name: PANYA Native Runner Integration CI R4
+name: PANYA Host Unblock R1 Windows Staging
 on:
   push:
     branches:
-      - panya/native-runner-r4-20261018
+      - panya/host-unblock-r1-20261024
 
 permissions:
   contents: read
 
 concurrency:
-  group: panya-native-runner-r4
+  group: panya-host-unblock-r1
   cancel-in-progress: false
 
 jobs:
@@ -27,7 +27,7 @@ jobs:
       - name: Validate exact trusted baseline
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -ne 'refs/heads/panya/native-runner-r4-20261018') { throw 'WRONG_BRANCH' }
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'WRONG_BRANCH' }
           git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
           if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
           if ((git status --porcelain).Length -gt 0) { throw 'DIRTY_CHECKOUT' }
@@ -83,7 +83,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud') { throw 'R4_WRONG_REPOSITORY' }
-          if ($env:GITHUB_REF -cne 'refs/heads/panya/native-runner-r4-20261018') { throw 'R4_WRONG_BRANCH' }
+          if ($env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'R4_WRONG_BRANCH' }
           if (-not $env:RUNNER_TEMP -or -not $env:GITHUB_ENV -or -not $env:PANYA_NATIVE_STAGE_TEST_ROOT) { throw 'R4_STAGE_ENV_MISSING' }
           $runnerTemp = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
           $stage = (Resolve-Path -LiteralPath $env:PANYA_NATIVE_STAGE_TEST_ROOT -ErrorAction Stop).ProviderPath
@@ -164,7 +164,7 @@ jobs:
       - name: Validate exact trusted baseline
         shell: pwsh
         run: |
-          if ($env:GITHUB_REF -ne 'refs/heads/panya/native-runner-r4-20261018') { throw 'WRONG_BRANCH' }
+          if ($env:GITHUB_REF -ne 'refs/heads/panya/host-unblock-r1-20261024') { throw 'WRONG_BRANCH' }
           git merge-base --is-ancestor 1a0453ed0ef1de4cdf9ce1ba9edee8da0de8426b HEAD
           if ($LASTEXITCODE -ne 0) { throw 'PINNED_BASE_MISMATCH' }
       - name: Set up Node 24
@@ -202,7 +202,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/native-runner-r4-20261018' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_CI_IDENTITY_NOT_ADMITTED' }
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_CI_IDENTITY_NOT_ADMITTED' }
           git merge-base --is-ancestor 624eb101cf2d84843e620b50b77753f5de84dff7 HEAD
           if ($LASTEXITCODE -ne 0 -or -not $env:RUNNER_TEMP -or -not $env:GITHUB_WORKSPACE) { throw 'R4_BASELINE_OR_RUNNER_UNVERIFIED' }
           $parent = (Resolve-Path -LiteralPath $env:RUNNER_TEMP -ErrorAction Stop).ProviderPath
@@ -241,7 +241,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:GITHUB_REF -cne 'refs/heads/panya/native-runner-r4-20261018' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_P1_HOST_CI_GATE_DENIED' }
+          if ($env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R4_P1_HOST_CI_GATE_DENIED' }
           $root = Join-Path $env:RUNNER_TEMP 'P1_20261017'
           $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
           if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R4_P1_FIXTURE_INVALID' }
@@ -258,3 +258,20 @@ jobs:
           if ($env:PANYA_P1_TEST_GATE) { throw 'R4_P1_GATE_ESCAPED_CI_STEP' }
           pnpm exec vitest run tests/windows-contained-launch.native-contract.test.ts --reporter=verbose
           if ($LASTEXITCODE -ne 0) { throw 'R4_NATIVE_STATIC_FAIL' }
+
+      - name: R1 isolated Writer Lease, Global Reservation, recovery and rollback
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:GITHUB_REPOSITORY -cne 'VAGOO1/lnwjud' -or $env:GITHUB_REF -cne 'refs/heads/panya/host-unblock-r1-20261024' -or $env:RUNNER_OS -cne 'Windows') { throw 'R1_RUNNER_IDENTITY_DENIED' }
+          if (-not $env:RUNNER_TEMP) { throw 'R1_RUNNER_TEMP_MISSING' }
+          $root = Join-Path $env:RUNNER_TEMP 'PANYA_HOST_UNBLOCK_R1_20261024'
+          if (Test-Path -LiteralPath $root) { throw 'R1_STAGE_ALREADY_EXISTS' }
+          New-Item -ItemType Directory -Path $root -ErrorAction Stop | Out-Null
+          $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+          if (-not $item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'R1_STAGE_REPARSE_DENIED' }
+          $env:PANYA_HOST_UNBLOCK_R1_ROOT = $root
+          $env:PANYA_HOST_UNBLOCK_R1_GATE = 'WINDOWS_CI_STAGING_ONLY'
+          pnpm exec vitest run tests/panya-host-unblock-r1.staging.test.ts --reporter=verbose
+          if ($LASTEXITCODE -ne 0) { throw 'R1_ISOLATED_CONTRACTS_FAIL' }
+          'R1_WINDOWS_FIXTURE_TESTS_COMPLETED_NO_HOST_MUTATION'
