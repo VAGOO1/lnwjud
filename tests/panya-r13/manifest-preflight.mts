@@ -71,6 +71,10 @@ export function previewR13SyntheticManifest(rawJson: unknown): R13Report {
   }
   let data: unknown;
   try { data = JSON.parse(rawJson); } catch { return globalHold('MALFORMED_MANIFEST_JSON'); }
+  // Canonical JSON disallows duplicate keys (and ambiguous alternate encodings).
+  // JSON.stringify may throw for deeply nested but syntactically valid input.
+  try { if (JSON.stringify(data) !== rawJson) return globalHold('MANIFEST_NONCANONICAL_OR_DUPLICATE_KEYS'); }
+  catch { return globalHold('MANIFEST_CANONICALIZATION_FAILED'); }
   if (!record(data) || data.version !== 1 || data.mode !== 'STAGING_SYNTHETIC_ONLY' ||
       typeof data.hostId !== 'string' || !data.hostId ||
       typeof data.targetWorkspaceId !== 'string' || !data.targetWorkspaceId ||
@@ -130,7 +134,9 @@ export function previewR13SyntheticManifest(rawJson: unknown): R13Report {
     }
     let inner: unknown;
     try { inner = JSON.parse(source); } catch { return fallback('ORIGINAL_MARKER_INVALID_JSON', 'invalid', undefined, sourceHash); }
-    if (!record(inner) || JSON.stringify(inner) !== source) return fallback('MARKER_NOT_CANONICAL_OR_DUPLICATE_KEYS', 'invalid', undefined, sourceHash);
+    if (!record(inner)) return fallback('ORIGINAL_MARKER_INVALID_SHAPE', 'invalid', undefined, sourceHash);
+    try { if (JSON.stringify(inner) !== source) return fallback('MARKER_NOT_CANONICAL_OR_DUPLICATE_KEYS', 'invalid', undefined, sourceHash); }
+    catch { return fallback('MARKER_CANONICALIZATION_FAILED', 'invalid', undefined, sourceHash); }
     const kind = stringField(inner, 'mutationKind') ?? 'legacy';
     const workspace = stringField(inner, 'ownerWorkspaceId');
     const fail = (reason: string) => fallback(reason, kind, workspace, sourceHash);
@@ -201,6 +207,8 @@ export function simulateR13QuarantineAudit(item: R13Item, eventsJson: unknown): 
   if (typeof eventsJson !== 'string' || eventsJson.length > 8192) return hold('INVALID_AUDIT_EVENTS', 0, initial);
   let events: unknown;
   try { events = JSON.parse(eventsJson); } catch { return hold('MALFORMED_AUDIT_EVENTS', 0, initial); }
+  try { if (JSON.stringify(events) !== eventsJson) return hold('AUDIT_NONCANONICAL_OR_DUPLICATE_KEYS', 0, initial); }
+  catch { return hold('AUDIT_CANONICALIZATION_FAILED', 0, initial); }
   if (!Array.isArray(events) || events.length !== 4) return hold('AUDIT_PHASE_COUNT_MISMATCH', 0, initial);
   const phases = ['LOCKED_PREVIEW','ORIGINAL_COPY_INSPECTED','OWNER_SCOPE_REVIEWED','QUARANTINE_SIMULATED'];
   let revision = 0, hash = initial;
