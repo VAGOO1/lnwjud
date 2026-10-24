@@ -81,9 +81,61 @@ export interface PreviewOutput {
 }
 
 const SHA256 = /^[0-9a-f]{64}$/i;
-const nonempty = (value: string | undefined): boolean => !!value?.trim();
+const nonempty = (value: string | undefined): boolean =>
+  typeof value === 'string' && value.trim().length > 0;
 const finiteTime = (value: number | undefined): value is number =>
   typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value);
+const own = (value: Record<string, unknown>, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(value, key);
+const required = (value: Record<string, unknown>, key: string, kind: 'string' | 'number' | 'boolean'): boolean =>
+  own(value, key) && typeof value[key] === kind;
+const optional = (value: Record<string, unknown>, key: string, kind: 'string' | 'number' | 'boolean'): boolean =>
+  !own(value, key) || value[key] === undefined || typeof value[key] === kind;
+
+/** Validate the complete JSON-like envelope before evaluating ANY candidate.
+ * A malformed sibling record blocks the whole batch; never produce partial GO.
+ * This remains a staging-only schema check, not trusted OS evidence.
+ */
+function isPreviewEnvelope(value: unknown): value is PreviewInput {
+  if (!isRecord(value) || !required(value, 'targetWorkspaceId', 'string') ||
+      !Array.isArray(value.entries) || value.entries.length === 0 || value.entries.length > 1000 ||
+      !Array.isArray(value.processObservations) || value.processObservations.length > 1000 ||
+      !isRecord(value.boot) || !isRecord(value.review)) return false;
+  const boot = value.boot;
+  const review = value.review;
+  if (!required(boot, 'trusted', 'boolean') ||
+      !required(boot, 'source', 'string') || !required(boot, 'hostId', 'string') ||
+      !required(boot, 'previousBootId', 'string') || !required(boot, 'currentBootId', 'string') ||
+      !required(boot, 'rebootAtMs', 'number') ||
+      !required(review, 'ownerApprovedRecorded', 'boolean') ||
+      !required(review, 'scope', 'string') || !required(review, 'reviewedBy', 'string') ||
+      !Array.isArray(review.items) || review.items.length > 1000) return false;
+  return value.entries.every((entry: unknown) => isRecord(entry) &&
+      required(entry, 'id', 'string') && required(entry, 'kind', 'string') &&
+      required(entry, 'hostId', 'string') && required(entry, 'workspaceId', 'string') &&
+      required(entry, 'recordedAtMs', 'number') &&
+      optional(entry, 'ownerClientId', 'string') && optional(entry, 'pid', 'number') &&
+      optional(entry, 'originBootId', 'string') && optional(entry, 'processStartedAtMs', 'number') &&
+      optional(entry, 'fingerprintSha256', 'string') && optional(entry, 'receiptVerified', 'boolean')) &&
+    value.processObservations.every((probe: unknown) => isRecord(probe) &&
+      required(probe, 'pid', 'number') && required(probe, 'currentBootId', 'string') &&
+      required(probe, 'state', 'string') && required(probe, 'trusted', 'boolean') &&
+      optional(probe, 'currentProcessStartedAtMs', 'number')) &&
+    review.items.every((item: unknown) => isRecord(item) &&
+      required(item, 'id', 'string') && required(item, 'workspaceId', 'string') &&
+      required(item, 'expectedFingerprintSha256', 'string'));
+}
+function invalidPreview(): PreviewOutput {
+  return {
+    mode: 'STAGING_READ_ONLY_PREVIEW', canMutateLive: false, mayReleaseReservation: false,
+    decisions: [{ id: '__invalid_input__', decision: 'HOLD', reason: 'MALFORMED_PREVIEW_INPUT',
+      taskOutcome: 'UNKNOWN_UNVERIFIED', nativeCompletionVerified: false }],
+    eligibleCount: 0, holdCount: 1,
+  };
+}
 
 /**
  * Conservative per-record preflight. No IO, no locks, no cleanup, no retries.
@@ -91,6 +143,7 @@ const finiteTime = (value: number | undefined): value is number =>
  * entirely separate, fenced, owner-reviewed quarantine transaction.
  */
 export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
+  if (!isPreviewEnvelope(input)) return invalidPreview();
   const counts = new Map<string, number>();
   for (const entry of input.entries) counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
   const reviewCounts = new Map<string, number>();
@@ -178,13 +231,19 @@ export interface JournalSnapshot {
 export function advanceStagingJournal(
   current: JournalSnapshot, expectedRevision: number, event: JournalEvent,
 ): JournalSnapshot {
+  const revision = isRecord(current) && Number.isSafeInteger(current.revision) &&
+    (current.revision as number) >= 0 && (current.revision as number) < Number.MAX_SAFE_INTEGER
+    ? current.revision as number : 0;
+  const hold = (reason: string): JournalSnapshot => ({ phase: 'HOLD', revision, admissionOpen: false, reason });
+  if (!isRecord(current) || current.admissionOpen !== false ||
+      typeof current.phase !== 'string') return hold('INVALID_JOURNAL_SNAPSHOT');
   if (!Number.isSafeInteger(current.revision) || current.revision < 0 ||
       current.revision >= Number.MAX_SAFE_INTEGER ||
       !Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
-    return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'INVALID_JOURNAL_REVISION' };
+    return hold('INVALID_JOURNAL_REVISION');
   }
-  if (current.revision !== expectedRevision) return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'CAS_REVISION_CONFLICT' };
-  if (event === 'fault') return { phase: 'HOLD', revision: current.revision + 1, admissionOpen: false, reason: 'FAULT_REQUIRES_MANUAL_RECONCILIATION' };
+  if (current.revision !== expectedRevision) return hold('CAS_REVISION_CONFLICT');
+  if (event === 'fault') return { phase: 'HOLD', revision: revision + 1, admissionOpen: false, reason: 'FAULT_REQUIRES_MANUAL_RECONCILIATION' };
   const transition: Record<Exclude<JournalPhase, 'HOLD'>, Partial<Record<JournalEvent, JournalPhase>>> = {
     NOT_STARTED: { acquire_barrier: 'BARRIER_HELD' },
     BARRIER_HELD: { verify_archive: 'ORIGINALS_ARCHIVED' },
@@ -192,9 +251,11 @@ export function advanceStagingJournal(
     LEDGER_FENCED: { verify_independently: 'INDEPENDENTLY_VERIFIED' },
     INDEPENDENTLY_VERIFIED: {},
   };
-  const next = current.phase === 'HOLD' ||
-    !Object.prototype.hasOwnProperty.call(transition, current.phase)
-    ? undefined : transition[current.phase][event];
-  if (!next) return { ...current, phase: 'HOLD', admissionOpen: false, reason: 'INVALID_OR_REPEATED_TRANSITION' };
-  return { phase: next, revision: current.revision + 1, admissionOpen: false };
+  if (current.phase === 'HOLD' ||
+      !Object.prototype.hasOwnProperty.call(transition, current.phase)) return hold('INVALID_OR_REPEATED_TRANSITION');
+  const row = transition[current.phase as Exclude<JournalPhase, 'HOLD'>];
+  const next = typeof event === 'string' && Object.prototype.hasOwnProperty.call(row, event)
+    ? row[event] : undefined;
+  if (typeof next !== 'string') return hold('INVALID_OR_REPEATED_TRANSITION');
+  return { phase: next, revision: revision + 1, admissionOpen: false };
 }
