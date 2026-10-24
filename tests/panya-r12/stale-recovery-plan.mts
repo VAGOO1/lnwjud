@@ -88,6 +88,55 @@ const finiteTime = (value: number | undefined): value is number =>
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === 'object' && value !== null && !Array.isArray(value);
+
+/** Capture only OWN DATA properties of JSON-like objects.
+ * Ignore neither sparse array holes nor accessor descriptors. Never call a getter
+ * or read inherited evidence. This is a bounded local staging snapshot, not an
+ * OS attestation or a substitute for the Host authorization boundary.
+ */
+const MALFORMED = Symbol('MALFORMED_STAGING_INPUT');
+function snapshotOwnData(raw: unknown): unknown | typeof MALFORMED {
+  const visited = new WeakSet<object>();
+  let nodes = 0;
+  function copy(value: unknown, depth: number): unknown | typeof MALFORMED {
+    if (++nodes > 20000 || depth > 12) return MALFORMED;
+    if (value === null || value === undefined || typeof value === 'string' ||
+        typeof value === 'number' || typeof value === 'boolean') return value;
+    if (typeof value !== 'object' || visited.has(value)) return MALFORMED;
+    visited.add(value);
+    const array = Array.isArray(value);
+    const prototype = Object.getPrototypeOf(value);
+    if (array ? prototype !== Array.prototype :
+        (prototype !== Object.prototype && prototype !== null)) return MALFORMED;
+    const props = Object.getOwnPropertyDescriptors(value);
+    const keys = Reflect.ownKeys(props);
+    if (keys.length > 20000 || keys.some(key => typeof key !== 'string')) return MALFORMED;
+    if (array) {
+      const length = props.length?.value;
+      if (!Number.isSafeInteger(length) || length > 1000 || length < 0 ||
+          keys.length !== length + 1) return MALFORMED;
+      const copied: unknown[] = [];
+      for (let i = 0; i < length; i++) {
+        const descriptor = props[String(i)];
+        if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return MALFORMED;
+        const child = copy(descriptor.value, depth + 1);
+        if (child === MALFORMED) return MALFORMED;
+        copied.push(child);
+      }
+      return copied;
+    }
+    const copied: Record<string, unknown> = Object.create(null);
+    for (const key of keys) {
+      const descriptor = props[key as string];
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return MALFORMED;
+      const child = copy(descriptor.value, depth + 1);
+      if (child === MALFORMED) return MALFORMED;
+      copied[key as string] = child;
+    }
+    return copied;
+  }
+  try { return copy(raw, 0); } catch { return MALFORMED; }
+}
 const own = (value: Record<string, unknown>, key: string): boolean =>
   Object.prototype.hasOwnProperty.call(value, key);
 const required = (value: Record<string, unknown>, key: string, kind: 'string' | 'number' | 'boolean'): boolean =>
@@ -143,7 +192,9 @@ function invalidPreview(): PreviewOutput {
  * entirely separate, fenced, owner-reviewed quarantine transaction.
  */
 export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
-  if (!isPreviewEnvelope(input)) return invalidPreview();
+  const snapshot = snapshotOwnData(input);
+  if (snapshot === MALFORMED || !isPreviewEnvelope(snapshot)) return invalidPreview();
+  input = snapshot;
   const counts = new Map<string, number>();
   for (const entry of input.entries) counts.set(entry.id, (counts.get(entry.id) ?? 0) + 1);
   const reviewCounts = new Map<string, number>();
@@ -231,6 +282,12 @@ export interface JournalSnapshot {
 export function advanceStagingJournal(
   current: JournalSnapshot, expectedRevision: number, event: JournalEvent,
 ): JournalSnapshot {
+  const snapshot = snapshotOwnData(current);
+  if (snapshot === MALFORMED || !isRecord(snapshot) || !own(snapshot, 'phase') ||
+      !own(snapshot, 'revision') || !own(snapshot, 'admissionOpen')) {
+    return { phase: 'HOLD', revision: 0, admissionOpen: false, reason: 'INVALID_JOURNAL_SNAPSHOT' };
+  }
+  current = snapshot as unknown as JournalSnapshot;
   const revision = isRecord(current) && Number.isSafeInteger(current.revision) &&
     (current.revision as number) >= 0 && (current.revision as number) < Number.MAX_SAFE_INTEGER
     ? current.revision as number : 0;
