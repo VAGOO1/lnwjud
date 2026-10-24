@@ -130,3 +130,67 @@ test('15 negative and unsafe journal revisions must HOLD', () => {
   assert.equal(advanceStagingJournal(bad, -1, 'acquire_barrier').reason, 'INVALID_JOURNAL_REVISION');
   assert.equal(advanceStagingJournal({ ...bad, revision: Number.MAX_SAFE_INTEGER }, Number.MAX_SAFE_INTEGER, 'acquire_barrier').phase, 'HOLD');
 });
+
+
+test('16 inherited journal event keys never pass as real transitions', () => {
+  const start = { phase: 'NOT_STARTED' as const, revision: 0, admissionOpen: false as const };
+  for (const key of ['constructor', 'toString', '__proto__', 'hasOwnProperty']) {
+    const result = advanceStagingJournal(start, 0, key as 'acquire_barrier');
+    assert.equal(result.phase, 'HOLD');
+    assert.equal(result.admissionOpen, false);
+    assert.equal(result.reason, 'INVALID_OR_REPEATED_TRANSITION');
+  }
+});
+
+test('17 malformed input containers return a single global HOLD rather than throw', () => {
+  for (const bad of [null, undefined, false, 'data', {}, { ...fixture(), entries: null },
+    { ...fixture(), entries: [null] }, { ...fixture(), boot: null },
+    { ...fixture(), review: null }, { ...fixture(), processObservations: null },
+    { ...fixture(), review: { ...fixture().review, items: null } }]) {
+    const result = previewStaleAfterReboot(bad as PreviewInput);
+    assert.equal(result.eligibleCount, 0);
+    assert.equal(result.holdCount, 1);
+    assert.equal(result.decisions[0].reason, 'MALFORMED_PREVIEW_INPUT');
+    assert.equal(result.canMutateLive, false);
+  }
+});
+
+test('18 incorrect entry identifier types and missing approval fingerprint fail closed', () => {
+  const badInputs: unknown[] = [
+    fixture({ entries: [{ ...entry, id: 17 as unknown as string }] }),
+    fixture({ entries: [{ ...entry, ownerClientId: 17 as unknown as string }] }),
+    fixture({ review: { ...fixture().review, items: [{ id: entry.id, workspaceId: entry.workspaceId }] as unknown as PreviewInput['review']['items'] } }),
+    fixture({ review: { ...fixture().review, items: [{ id: entry.id, workspaceId: entry.workspaceId, expectedFingerprintSha256: null as unknown as string }] } }),
+  ];
+  for (const bad of badInputs) {
+    const result = previewStaleAfterReboot(bad as PreviewInput);
+    assert.equal(result.eligibleCount, 0);
+    assert.equal(result.decisions[0].decision, 'HOLD');
+  }
+});
+
+test('19 a malformed sibling denies the whole batch without partial eligibility', () => {
+  const result = previewStaleAfterReboot(fixture({ entries: [entry, { ...entry, id: 123 as unknown as string }] }));
+  assert.equal(result.eligibleCount, 0);
+  assert.equal(result.decisions.length, 1);
+  assert.equal(result.decisions[0].reason, 'MALFORMED_PREVIEW_INPUT');
+});
+
+test('20 journal malformed snapshots and runtime event types preserve HOLD', () => {
+  const start = { phase: 'NOT_STARTED' as const, revision: 0, admissionOpen: false as const };
+  for (const invalid of [null, undefined, {}, { ...start, admissionOpen: true },
+    { ...start, phase: '__proto__' }, { ...start, revision: '0' }]) {
+    const result = advanceStagingJournal(invalid as typeof start, 0, 'acquire_barrier');
+    assert.equal(result.phase, 'HOLD');
+    assert.equal(result.admissionOpen, false);
+  }
+  assert.equal(advanceStagingJournal(start, 0, null as unknown as 'acquire_barrier').phase, 'HOLD');
+  assert.equal(advanceStagingJournal(start, 0, {} as 'acquire_barrier').phase, 'HOLD');
+});
+
+test('21 no current process evidence or non-boolean approval can ever grant eligibility', () => {
+  const a = fixture({ processObservations: [{} as PreviewInput['processObservations'][number]] });
+  assert.equal(previewStaleAfterReboot(a).eligibleCount, 0);
+  const b = fixture({ review: { ...fixture().review, ownerApprovedRecorded: 'false' as unknown as boolean } });
+  assert.equal(previewStaleAfterReboot(b).eligibleCount, 0);
+});
