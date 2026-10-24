@@ -13,3 +13,5 @@ Validation: dotnet run --project tests/panya-r15/Panya.R15.NativeProbe.csproj -c
 Historical 5.8.7 markers never captured a verified original boot ID, kernel process creation identity or native Job origin. No later read can manufacture the historical binding. Work on installed Host, Writer Lease or any of 20 reservations needs a separate scope, provenance validation, owner approval and independently verified rollback.
 
 Source retains MIT license; only synthetic fixtures and CI runner's own process are used.
+
+R15 independent review follow-up: the Node contract now checks the observation field type before any coercion, and the native probe emits UTC DateTime timestamps with canonical Z suffix. The Windows workflow also pipes an actual GitHub runner native process JSON observation to a separate Node smoke validator, which must return HOLD even on a good current-process observation. This is not authenticated old-process or boot attribution.

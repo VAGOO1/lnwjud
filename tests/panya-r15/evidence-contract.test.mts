@@ -68,3 +68,12 @@ test('11 unknown state fails closed',()=>{
 test('12 empty object is not an observation',()=>{
   assert.equal(review({}).reason,'UNTRUSTED_OR_INVALID_SOURCE_CONTRACT');
 });
+
+test('13 untrusted object observation cannot throw or bypass HOLD',()=>{
+  const r=review({...base,observation:{toString:null,valueOf:null}});
+  assertBlocked(r); assert.equal(r.reason,'INVALID_OBSERVATION_TYPE');
+});
+test('14 UTC Z native wire style still cannot prove old task completion',()=>{
+  const r=review({...base,observedAtUtc:'2026-10-25T06:51:01.1234567Z'});
+  assertBlocked(r); assert.equal(r.reason,'CURRENT_OBJECT_ONLY_NO_ORIGINAL_BINDING');
+});

@@ -36,6 +36,9 @@ export function reviewR15Observation(raw: unknown): R15Review {
       parsed.taskOutcome !== 'UNKNOWN_NO_TERMINAL_RECEIPT' ||
       parsed.canMutateHost !== false || parsed.canReleaseReservation !== false ||
       parsed.nativeReceiptVerified !== false) return hold('UNKNOWN','UNTRUSTED_OR_INVALID_SOURCE_CONTRACT');
+  // Reject untrusted JSON types BEFORE any implicit coercion or String(...) call.
+  // A JSON object with null toString and valueOf must never throw or authorize.
+  if (typeof parsed.observation !== 'string') return hold('UNKNOWN','INVALID_OBSERVATION_TYPE');
   if (parsed.observation === 'PROCESS_OBJECT_OBSERVED_AT_QUERY') {
     if (typeof parsed.kernelCreationFiletimeUtcTicks !== 'string' ||
         !/^[1-9]\d{0,19}$/.test(parsed.kernelCreationFiletimeUtcTicks) ||
@@ -43,7 +46,7 @@ export function reviewR15Observation(raw: unknown): R15Review {
     return hold('PROCESS_OBJECT_OBSERVED_AT_QUERY','CURRENT_OBJECT_ONLY_NO_ORIGINAL_BINDING');
   }
   if (['NOT_OPENED_UNPROVEN','GET_TIMES_FAILED_UNPROVEN',
-    'INVALID_FILETIME_UNPROVEN','INVALID_PID_UNPROVEN','UNSUPPORTED_OS_UNPROVEN'].includes(String(parsed.observation))) {
+    'INVALID_FILETIME_UNPROVEN','INVALID_PID_UNPROVEN','UNSUPPORTED_OS_UNPROVEN'].includes(parsed.observation)) {
     return hold('NOT_PROVEN_CURRENT','NO_OPEN_HANDLE_DOES_NOT_PROVE_TASK_TERMINATED');
   }
   return hold('UNKNOWN','UNKNOWN_OBSERVATION');

@@ -30,7 +30,7 @@ internal static class Program
 
     private static ProbeEvidence Probe(int pid)
     {
-        string observedAt = DateTimeOffset.UtcNow.ToString("O", CultureInfo.InvariantCulture);
+        string observedAt = DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture); // UTC DateTime emits canonical Z, not escaped +00:00
         if (pid <= 0) return Evidence(pid, observedAt, "INVALID_PID_UNPROVEN");
         if (!OperatingSystem.IsWindows()) return Evidence(pid, observedAt, "UNSUPPORTED_OS_UNPROVEN");
 

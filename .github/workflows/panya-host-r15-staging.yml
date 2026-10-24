@@ -38,6 +38,11 @@ jobs:
       - name: Validate staged historical evidence fail-closed contracts
         shell: pwsh
         run: node --test tests/panya-r12/stale-recovery-plan.test.mts tests/panya-r13/manifest-preflight.test.mts tests/panya-r15/evidence-contract.test.mts
+      - name: Validate actual Windows native JSON wire against Node contract
+        shell: pwsh
+        run: |
+          $json = dotnet run --project tests/panya-r15/Panya.R15.NativeProbe.csproj -c Release -- --pid $PID
+          $json | node tests/panya-r15/native-wire-smoke.mts
       - name: Confirm boundary
         shell: pwsh
         run: Write-Output 'R15_STAGING_ONLY_NO_PANYA_HOME_HOST_ACCESS_NO_RELEASE'
