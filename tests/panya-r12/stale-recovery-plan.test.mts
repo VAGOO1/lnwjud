@@ -244,3 +244,30 @@ test('26 cyclic, proxy-like and sparse owner input fails closed without partial 
   assert.equal(result.decisions[0].decision, 'HOLD');
   assert.equal(result.canMutateLive, false);
 });
+
+
+test('27 a Proxy cannot cause getter evaluation through own-property reflection', () => {
+  let getterCalls = 0;
+  let trapCalls = 0;
+  const backing = { ...entry };
+  Object.defineProperty(backing, 'ownerClientId', { configurable: true, enumerable: true,
+    get() { getterCalls++; return 'client-a'; } });
+  const proxied = new Proxy(backing, {
+    getOwnPropertyDescriptor(target, key) {
+      trapCalls++;
+      return { configurable: true, enumerable: true, writable: true, value: Reflect.get(target, key) };
+    },
+  });
+  const decision = previewStaleAfterReboot(fixture({ entries: [proxied] }));
+  assert.equal(decision.eligibleCount, 0);
+  assert.equal(decision.decisions[0].decision, 'HOLD');
+  assert.equal(getterCalls, 0);
+  assert.equal(trapCalls, 0);
+});
+
+test('28 two separate record objects with duplicate IDs fail closed', () => {
+  const result = previewStaleAfterReboot(fixture({ entries: [entry, { ...entry }] }));
+  assert.equal(result.eligibleCount, 0);
+  assert.equal(result.holdCount, 2);
+  assert.equal(result.decisions[0].reason, 'DUPLICATE_OR_EMPTY_ENTRY_ID');
+});
