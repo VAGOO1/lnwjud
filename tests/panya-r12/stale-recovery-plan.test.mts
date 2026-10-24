@@ -100,3 +100,14 @@ test('10 every output remains a staging-only preview, never a live repair author
   assert.equal(result.mayReleaseReservation, false);
   assert.equal(result.holdCount, 0);
 });
+
+
+test('11 malformed entry kind is denied even if runtime input bypasses TypeScript checks', () => {
+  const malicious = { ...entry, kind: 'unrecognized_record_type' } as unknown as RecoveryEntry;
+  assert.equal(one(fixture({ entries: [malicious] })).reason, 'ENTRY_KIND_UNRECOGNIZED');
+});
+
+test('12 malformed process liveness state is denied rather than assuming absent', () => {
+  const unknown = { pid: 50000, currentBootId: 'boot-after', state: 'alive_or_new_value', trusted: true };
+  assert.equal(one(fixture({ processObservations: [unknown as PreviewInput['processObservations'][number]] })).reason, 'PROCESS_STATE_UNRECOGNIZED');
+});
