@@ -113,6 +113,9 @@ export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
     });
     if (!nonempty(entry.id) || counts.get(entry.id) !== 1) return hold('DUPLICATE_OR_EMPTY_ENTRY_ID');
     if (entry.kind === 'legacy') return hold('LEGACY_IDENTITY_UNPROVEN');
+    if (entry.kind !== 'writer_call' && entry.kind !== 'contained_process' && entry.kind !== 'opaque') {
+      return hold('ENTRY_KIND_UNRECOGNIZED');
+    }
     if (!reviewed) return hold('OWNER_REVIEW_OR_SCOPE_MISSING');
     if (!trustedBoot || boot.hostId !== entry.hostId) return hold('TRUSTED_BOOT_PROOF_MISSING');
     if (!nonempty(entry.ownerClientId) || entry.workspaceId !== input.targetWorkspaceId) return hold('OWNERSHIP_SCOPE_UNPROVEN');
@@ -132,6 +135,10 @@ export function previewStaleAfterReboot(input: PreviewInput): PreviewOutput {
     if (proofCounts.get(entry.pid!) !== 1) return hold('PROCESS_PROBE_NOT_UNIQUE');
     const probe = input.processObservations.find(p => p.pid === entry.pid);
     if (!probe?.trusted || probe.currentBootId !== boot.currentBootId) return hold('CURRENT_PROCESS_PROOF_MISSING');
+    if (probe.state !== 'absent' && probe.state !== 'reused_pid' &&
+        probe.state !== 'same_process' && probe.state !== 'unknown') {
+      return hold('PROCESS_STATE_UNRECOGNIZED');
+    }
     if (probe.state === 'same_process' || probe.state === 'unknown') return hold('CURRENT_PROCESS_LIVENESS_UNVERIFIED');
     if (probe.state === 'reused_pid' &&
         (!finiteTime(probe.currentProcessStartedAtMs) || probe.currentProcessStartedAtMs <= boot.rebootAtMs)) {
