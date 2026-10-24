@@ -202,3 +202,33 @@ test('30 claimed boot source must match snapshot Host identity', () => {
   const crossHost = { ...boot, hostId: 'other-host' };
   assert.equal(result(sample({ boot: crossHost })).reason, 'BOOT_IDENTITY_CLAIM_NOT_CONSISTENT');
 });
+
+test('31 duplicate top-level JSON keys never override earlier conflicting host identity', () => {
+  const raw = JSON.stringify(sample()).replace('"hostId":"synthetic-host-a"', '"hostId":"other-host","hostId":"synthetic-host-a"');
+  const out = previewR13SyntheticManifest(raw);
+  assert.equal(out.status, 'HOLD');
+  assert.equal(out.error, 'MANIFEST_NONCANONICAL_OR_DUPLICATE_KEYS');
+  assert.equal(out.canReleaseReservation, false);
+});
+test('32 duplicate nested reviewer identity is rejected even if last value is correct', () => {
+  const raw = JSON.stringify(sample()).replace('"taskId":"task-alpha","ownerWorkspaceId"', '"taskId":"wrong","taskId":"task-alpha","ownerWorkspaceId"');
+  const out = previewR13SyntheticManifest(raw);
+  assert.equal(out.status, 'HOLD');
+  assert.equal(out.error, 'MANIFEST_NONCANONICAL_OR_DUPLICATE_KEYS');
+});
+test('33 duplicate keys in a simulated audit cannot produce a success status', () => {
+  const item=result();
+  const raw=auditEvents(item).replace('"taskId":"task-alpha"','"taskId":"wrong","taskId":"task-alpha"');
+  const out=simulateR13QuarantineAudit(item,raw);
+  assert.equal(out.phase,'HOLD');
+  assert.equal(out.error,'AUDIT_NONCANONICAL_OR_DUPLICATE_KEYS');
+  assert.equal(out.mayReleaseReservation,false);
+});
+test('34 unusually nested JSON fails closed rather than throwing outside catch', () => {
+  const deep = '{"x":'.repeat(9000)+'0'+'}'.repeat(9000);
+  const original=JSON.stringify(sample());
+  const payload=original.slice(0,-1)+',"unusedDeep":'+deep+'}';
+  const out=previewR13SyntheticManifest(payload);
+  assert.equal(out.status,'HOLD');
+  assert.equal(out.canMutateHost,false);
+});
