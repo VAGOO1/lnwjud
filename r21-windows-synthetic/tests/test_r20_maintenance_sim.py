@@ -478,10 +478,18 @@ def test_main_audit_writer_drift_blocks_rollback(fx):
 
 def test_fence_denies_new_writers_with_two_processes(fx):
     r20.prepare(fx)
-    script='import sys;sys.path.insert(0,sys.argv[1]);import r20_maintenance_sim as m;from pathlib import Path;print(m.admission_snapshot(Path(sys.argv[2]))["status"])'
+    # Windows nonblocking msvcrt locking may reject one concurrent reader
+    # with LOCK_BUSY; both forms are fail-closed and neither permits admission.
+    script=(
+        'import sys;sys.path.insert(0,sys.argv[1]);import r20_maintenance_sim as m;from pathlib import Path\n'
+        'try:\n'
+        ' print(m.admission_snapshot(Path(sys.argv[2]))["status"])\n'
+        'except m.FailClosed as e:\n'
+        ' print("DENIED_LOCK_BUSY" if str(e)=="LOCK_BUSY" else "UNEXPECTED_ERROR")\n'
+    )
     one=subprocess.Popen([sys.executable,'-c',script,str(ROOT),str(fx)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     two=subprocess.Popen([sys.executable,'-c',script,str(ROOT),str(fx)],stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
     for proc in (one,two):
         o,err=proc.communicate(timeout=10)
         assert proc.returncode==0,err
-        assert 'DENIED_MAINTENANCE_EPOCH' in o
+        assert o.strip() in {"DENIED_MAINTENANCE_EPOCH","DENIED_LOCK_BUSY"}, (o,err)
