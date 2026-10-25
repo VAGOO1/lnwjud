@@ -1,0 +1,33 @@
+name: PANYA R21 Disposable Windows Synthetic Validation
+on:
+  push:
+    branches: [panya/r21-disposable-win-native-20261025]
+    paths:
+      - .github/workflows/panya-r21-disposable-windows.yml
+      - r21-windows-synthetic/**
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: panya-r21-win-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  isolated-r20-sim:
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      - name: Checkout branch (no secrets)
+        uses: actions/checkout@v4
+      - name: Python 3.13 for windows msvcrt lock
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install pinned test-only pytest
+        run: python -m pip install --disable-pip-version-check pytest==9.0.2
+      - name: Confirm sanitized dummy paths and run 78 synthetic tests
+        shell: pwsh
+        run: |
+          if (Select-String -Path r21-windows-synthetic/r20_maintenance_sim.py -Pattern 'C:\Users\ADMIN|5a4778fc-c959-4b56-877f-7f64d3e152a8|d59e1ab1-f131-4e35-9cbe-08c6d8c80120' -Quiet) { throw 'PRIVATE ID PRESENT' }
+          python -m pytest -q -p no:asyncio r21-windows-synthetic/tests/test_r20_maintenance_sim.py
+      - name: Execute synthetic-only temp demo
+        run: python r21-windows-synthetic/r20_maintenance_sim.py --synthetic-demo
