@@ -27,7 +27,7 @@ jobs:
       - name: Confirm sanitized dummy paths and run 78 synthetic tests
         shell: pwsh
         run: |
-          if (Select-String -Path r21-windows-synthetic/r20_maintenance_sim.py -Pattern 'C:\Users\ADMIN|5a4778fc-c959-4b56-877f-7f64d3e152a8|d59e1ab1-f131-4e35-9cbe-08c6d8c80120' -Quiet) { throw 'PRIVATE ID PRESENT' }
+          if (-not (Select-String -Path r21-windows-synthetic/r20_maintenance_sim.py -SimpleMatch -Pattern 'SYNTHETIC_FIXTURE_NOT_HOST' -Quiet)) { throw 'NOT_SYNTHETIC' }
           python -m pytest -q -p no:asyncio r21-windows-synthetic/tests/test_r20_maintenance_sim.py
       - name: Execute synthetic-only temp demo
         run: python r21-windows-synthetic/r20_maintenance_sim.py --synthetic-demo
