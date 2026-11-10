@@ -1,3 +1,4 @@
+import { isEngineeringWorkerTarget } from '@lnwjud/shared';
 import { app, BrowserWindow, clipboard, ClipboardItem, crashReporter, desktopCapturer, dialog, ipcMain, Menu, nativeImage, net, Notification, safeStorage, screen, shell, Tray, type IpcMainInvokeEvent } from 'electron';
 import { randomBytes } from 'node:crypto';
 import path from 'node:path';
@@ -96,6 +97,7 @@ import { createExplicitKeySecretProtector, DEFAULT_DISPLAY_TIME_ZONE, DEFAULT_MC
 import { applyPendingSqliteRestoreSync, CheckpointKeyStore, type CheckpointPayloadCipher } from '@lnwjud/storage';
 import { createDesktopRuntime, formatCompleteTargetDetail, formatIncompleteLegacyHistory, writeSerializedLogRows, type DesktopRuntime } from './desktop-services.js';
 import { resolveTunnelProfileDirectory, TUNNEL_SECRET_FILE_NAME } from './tunnel-controller.js';
+import { TunnelAliasRetirementJournal, tunnelAliasRecoveryDirectory } from './tunnel-runtime-alias-journal.js';
 import { migrateLegacyWindowsSecrets } from './legacy-secret-migration.js';
 import { installPdfProvider } from './pdf-provider-installer.js';
 import { DesktopShutdownCoordinator } from './desktop-shutdown.js';
@@ -104,8 +106,8 @@ import { parseOpenExternalSetupPageRequest, resolveExternalSetupUrl } from './ex
 import { shouldHoldSingleInstanceLock, wantsMcpStdio } from './instance-lock.js';
 import { createLogViewerWindow, createMainWindow, createMutationApprovalWindow, getRendererEntryPath, isAllowedRendererUrl } from './window.js';
 import { createTrayMenuTemplate, createTrayToolTip, createTrayUpdateLabel, getTrayIconPath, shouldHideMainWindowOnClose } from './tray.js';
-import { confirmTunnelStopForUpdate, UpdateInstallCoordinator, updateInstallNeedsTunnelStopConfirmation, type UpdateSharedActivitySnapshot } from './update-install.js';
-import { UpdateCheckScheduler } from './update-check-scheduler.js';
+import { installAfterPreUpdateBackup, UpdateInstallConsentController, UpdateInstallCoordinator, UpdateTunnelRecovery, updateInstallNeedsTunnelStopConfirmation, type DownloadedUpdateOffer, type UpdateSharedActivitySnapshot } from './update-install.js';
+import { UpdateCheckInitializationQueue, UpdateCheckScheduler, type UpdateCheckSource } from './update-check-scheduler.js';
 import {
   configureUpdaterForDistribution,
   configureUpdaterForPlatform,
@@ -117,7 +119,6 @@ import {
   launchPortableReplacement,
   preparePortableReplacement,
   usesElectronUpdaterInstall,
-  waitsForNativeInstallAcceptance,
 } from './portable-update.js';
 import { platformCompatibilityProfile, supportedHostPlatform } from './platform-compatibility.js';
 import { atomicWrite, type IncidentDesktopMemory, type IncidentReport } from './incident-report.js';
@@ -139,6 +140,8 @@ import type { ElectronNativeCapabilityApi, NativeDesktopCaptureRequest, NativeDe
 import { configureLinuxAutostart } from './linux-autostart.js';
 import { InstallActivityCoordinator } from './install-activity.js';
 import { canInstallMacosUpdates } from './macos-update-trust.js';
+import { installWindowsUpdate } from './windows-update-install.js';
+import { createNativeUpdateBootstrapClient, hasVerifiedAutomaticUpdateAuthority, type NativeUpdateBootstrapClient } from './native-update-client.js';
 
 const ECC_UPSTREAM_VERSION = '2.2.1';
 
@@ -182,6 +185,7 @@ export interface DesktopIpcServices {
   saveTunnelApiKey(request: SaveTunnelApiKeyRequest): Promise<{ readonly saved: boolean }>;
   startTunnel(): Promise<TunnelStatus>;
   stopTunnel(): Promise<TunnelStatus>;
+  stopTunnelFromUser(): Promise<TunnelStatus>;
   getTunnelStatus(): Promise<TunnelStatus>;
   beginTunnelOAuthLogin(): Promise<TunnelOAuthLoginStatus>;
   getTunnelOAuthLoginStatus(): Promise<TunnelOAuthLoginStatus>;
@@ -370,6 +374,7 @@ const defaultDesktopServices: DesktopIpcServices = {
   saveTunnelApiKey: async (): Promise<{ readonly saved: boolean }> => ({ saved: false }),
   startTunnel: async (): Promise<TunnelStatus> => emptyTunnel,
   stopTunnel: async (): Promise<TunnelStatus> => emptyTunnel,
+  stopTunnelFromUser: async (): Promise<TunnelStatus> => emptyTunnel,
   getTunnelStatus: async (): Promise<TunnelStatus> => emptyTunnel,
   beginTunnelOAuthLogin: async (): Promise<TunnelOAuthLoginStatus> => ({ state: 'idle', available: false, providerId: null, authorizationUrl: null, message: 'OAuth unavailable' }),
   getTunnelOAuthLoginStatus: async (): Promise<TunnelOAuthLoginStatus> => ({ state: 'idle', available: false, providerId: null, authorizationUrl: null, message: 'OAuth unavailable' }),
@@ -597,7 +602,7 @@ export function registerIpcHandlers(
   registerHandler(ipcChannels.stopTunnel, async (event, payload: unknown) => {
     assertTrustedSender(event, getMainWindow());
     assertNoPayload(payload);
-    return services.stopTunnel();
+    return services.stopTunnelFromUser();
   });
   registerHandler(ipcChannels.getTunnelStatus, async (event, payload: unknown) => {
     assertTrustedSender(event, getMainWindow());
@@ -1473,12 +1478,14 @@ function ponytailModeField(value: unknown): 'off' | 'lite' | 'full' | 'ultra' {
 
 function engineeringHarnessSettingsField(value: unknown): NonNullable<UserSettings['engineeringHarness']> {
   if (!isRecord(value)
-    || Object.keys(value).some((key) => !['schemaVersion', 'enabled', 'profile', 'applyTo', 'autoProjectAssessment', 'custom'].includes(key))
+    || Object.keys(value).some((key) => !['schemaVersion', 'enabled', 'profile', 'applyTo', 'autoProjectAssessment', 'custom', 'hostedCi', 'allowNoGit', 'workerTarget'].includes(key))
     || value.schemaVersion !== 1
     || typeof value.enabled !== 'boolean'
     || (value.profile !== 'standard' && value.profile !== 'senior' && value.profile !== 'strict' && value.profile !== 'custom')
     || (value.applyTo !== 'coding_projects' && value.applyTo !== 'all_workspaces')
     || typeof value.autoProjectAssessment !== 'boolean') throw new Error('Invalid IPC payload: engineeringHarness');
+  if ((value.hostedCi !== undefined && value.hostedCi !== 'required' && value.hostedCi !== 'local_only') || (value.allowNoGit !== undefined && typeof value.allowNoGit !== 'boolean')) throw new Error('Invalid Engineering delivery policy');
+  if (value.workerTarget !== undefined && !isEngineeringWorkerTarget(value.workerTarget)) throw new Error('Invalid Engineering Worker target');
   const custom = value.custom;
   if (custom !== undefined && (!isRecord(custom)
     || Object.keys(custom).some((key) => !['analysis', 'review', 'validation', 'docsImpactCheck'].includes(key))
@@ -1492,6 +1499,9 @@ function engineeringHarnessSettingsField(value: unknown): NonNullable<UserSettin
     profile: value.profile,
     applyTo: value.applyTo,
     autoProjectAssessment: value.autoProjectAssessment,
+    ...(value.workerTarget === undefined || !isEngineeringWorkerTarget(value.workerTarget) ? {} : { workerTarget: value.workerTarget }),
+    ...(value.hostedCi === undefined ? {} : { hostedCi: value.hostedCi }),
+    ...(value.allowNoGit === undefined ? {} : { allowNoGit: value.allowNoGit }),
     ...(custom === undefined ? {} : { custom: {
       analysis: custom.analysis as 'focused' | 'cross_file',
       review: custom.review as 'risk_based' | 'always',
@@ -1578,19 +1588,27 @@ let tray: Tray | null = null;
 let desktopLocale: UiLocale = 'th';
 let desktopUserSettings: UserSettings = defaultUserSettings;
 let autoUpdaterInitialized = false;
+let verifiedAutomaticUpdateAuthority = false;
+let autoUpdaterInitializationPending = false;
 let quitRequested = false;
 let factoryResetQueued = false;
 const desktopIpcDrainBarrier = new DesktopIpcDrainBarrier();
 let desktopShutdownCoordinator: DesktopShutdownCoordinator | null = null;
 let updateInstallCoordinator: UpdateInstallCoordinator | null = null;
-let updateInstallConfirmationPending = false;
+let updateInstallConsentController: UpdateInstallConsentController | null = null;
+const updateTunnelRecovery = new UpdateTunnelRecovery();
+let nativeUpdateBootstrapClient: NativeUpdateBootstrapClient | null = null;
 let updateCheckScheduler: UpdateCheckScheduler | null = null;
-let pendingUpdateCheckSource: 'automatic' | 'tray' | 'renderer' | null = null;
+let pendingUpdateCheckSource: UpdateCheckSource | null = null;
+let updateCheckAttempt = 0;
+const initializationUpdateChecks = new UpdateCheckInitializationQueue();
 const windowsDistribution = detectWindowsDistribution(app.isPackaged);
 const updaterDistribution = detectUpdaterDistribution(app.isPackaged, process.platform, process.env);
 const platformCompatibility = platformCompatibilityProfile(process.platform, os.release(), process.arch);
 let pendingPortableUpdate: { readonly version: string; readonly downloadedFile: string } | null = null;
 let pendingLinuxAppImageUpdate: { readonly version: string; readonly downloadedFile: string } | null = null;
+let downloadedUpdateGeneration = 0;
+let currentDownloadedUpdateOffer: DownloadedUpdateOffer | null = null;
 let crashDiagnostics: CrashDiagnosticsRecorder | null = null;
 let desktopSessionDiagnostics: DesktopSessionDiagnostics | null = null;
 let runtimeDiagnosticsHistory: RuntimeDiagnosticsHistoryRecorder | null = null;
@@ -1741,6 +1759,10 @@ async function requestFactoryReset(dataPath: string): Promise<{ readonly accepte
   });
   if (confirmation.response !== 0) return { accepted: false };
 
+  // Do not claim reset accepted until the owned native runtime alias is gone.
+  // runtimes rm removes its local profile and health/log files, too.
+  if (desktopRuntime === null) throw new Error('Desktop runtime is unavailable for verified Tunnel reset');
+  await desktopRuntime.prepareFactoryReset();
   stageFactoryResetSync(dataPath);
   factoryResetQueued = true;
   setTimeout(() => {
@@ -1772,7 +1794,7 @@ async function requestFactoryReset(dataPath: string): Promise<{ readonly accepte
   return { accepted: true };
 }
 
-function requestUpdateCheck(source: 'automatic' | 'tray' | 'renderer'): UpdateStatus {
+function requestUpdateCheck(source: UpdateCheckSource): UpdateStatus {
   const messages = nativeMessages(desktopLocale);
   if (!app.isPackaged) {
     const status = patchUpdateStatus({ phase: 'unavailable', message: messages.updaterUnavailable, canInstall: false });
@@ -1781,17 +1803,31 @@ function requestUpdateCheck(source: 'automatic' | 'tray' | 'renderer'): UpdateSt
     }
     return status;
   }
-  if (!autoUpdaterInitialized && currentUpdateStatus.phase === 'unavailable') {
+  if (!autoUpdaterInitialized) {
+    const message = autoUpdaterInitializationPending
+      ? messages.updaterAuthorityChecking
+      : currentUpdateStatus.phase === 'unavailable' || currentUpdateStatus.phase === 'error'
+        ? currentUpdateStatus.message ?? messages.updaterUnavailableTransactionAuthority
+        : messages.updaterUnavailableTransactionAuthority;
+    if (autoUpdaterInitializationPending && !quitRequested) {
+      initializationUpdateChecks.enqueue(source);
+      return patchUpdateStatus({ phase: 'checking', progressPercent: null, message, canInstall: false });
+    }
     if (source === 'tray') {
       void dialog.showMessageBox({
         type: 'info', title: messages.updaterCheckTitle,
-        message: boundedNativeDialogText(currentUpdateStatus.message ?? messages.updaterUnavailable),
+        message: boundedNativeDialogText(message),
         buttons: [messages.ok],
       });
     }
-    return currentUpdateStatus;
+    return currentUpdateStatus.phase === 'idle'
+      ? patchUpdateStatus({ phase: 'unavailable', message, canInstall: false })
+      : currentUpdateStatus;
   }
   if (currentUpdateStatus.phase === 'available') {
+    if (!verifiedAutomaticUpdateAuthority) {
+      return patchUpdateStatus({ phase: 'unavailable', message: messages.updaterUnavailableTransactionAuthority, canInstall: false });
+    }
     if (source !== 'automatic' && !desktopUserSettings.updateAutoDownload) {
       const status = patchUpdateStatus({
         phase: 'downloading',
@@ -1818,10 +1854,25 @@ function requestUpdateCheck(source: 'automatic' | 'tray' | 'renderer'): UpdateSt
     }
     return currentUpdateStatus;
   }
+  return startUpdateCheck(source);
+}
+
+function startUpdateCheck(source: UpdateCheckSource): UpdateStatus {
+  const messages = nativeMessages(desktopLocale);
   pendingUpdateCheckSource = source;
+  const attempt = ++updateCheckAttempt;
   const status = patchUpdateStatus({ phase: 'checking', progressPercent: null, message: messages.updaterChecking, canInstall: false });
-  void autoUpdater.checkForUpdates().catch((error: unknown) => {
-    if (pendingUpdateCheckSource !== source) return;
+  void Promise.resolve().then(() => {
+    if (quitRequested) {
+      if (pendingUpdateCheckSource === source && updateCheckAttempt === attempt) {
+        pendingUpdateCheckSource = null;
+        patchUpdateStatus({ phase: 'unavailable', message: nativeMessages(desktopLocale).updaterUnavailable, canInstall: false });
+      }
+      return;
+    }
+    return autoUpdater.checkForUpdates();
+  }).catch((error: unknown) => {
+    if (pendingUpdateCheckSource !== source || updateCheckAttempt !== attempt) return;
     pendingUpdateCheckSource = null;
     const message = error instanceof Error ? error.message : nativeMessages(desktopLocale).updaterCheckFailed;
     console.error(`[AutoUpdater] ${source} check failed: ${message}`);
@@ -1851,66 +1902,48 @@ function boundedNativeDialogText(text: string): string {
 }
 
 async function requestUpdateInstall(): Promise<{ readonly accepted: boolean; readonly status: UpdateStatus }> {
-  if (!app.isPackaged || currentUpdateStatus.phase !== 'ready' || updateInstallCoordinator === null || updateInstallConfirmationPending) {
+  const consent = updateInstallConsentController;
+  if (!verifiedAutomaticUpdateAuthority || !app.isPackaged || currentUpdateStatus.phase !== 'ready' || consent === null) {
     return { accepted: false, status: currentUpdateStatus };
   }
-  const runtime = desktopRuntime;
-  if (runtime === null) return { accepted: false, status: currentUpdateStatus };
-
-  updateInstallConfirmationPending = true;
   try {
-    const approved = await confirmTunnelStopForUpdate({
-      getTunnelStatus: () => runtime.services.getTunnelStatus(),
-      confirmStop: async (): Promise<boolean> => {
-        const messages = nativeMessages(desktopLocale);
-        const options = {
-          type: 'warning' as const,
-          title: messages.updaterTunnelStopTitle,
-          message: messages.updaterTunnelStopMessage,
-          detail: messages.updaterTunnelStopDetail,
-          buttons: [messages.updaterTunnelStopConfirm, messages.cancel],
-          defaultId: 1,
-          cancelId: 1,
-          noLink: true,
-        };
-        const parent = mainWindow !== null && !mainWindow.isDestroyed() ? mainWindow : null;
-        const result = parent === null
-          ? await dialog.showMessageBox(options)
-          : await dialog.showMessageBox(parent, options);
-        return result.response === 0;
-      },
-    });
-    if (!approved) return { accepted: false, status: currentUpdateStatus };
-
-    // Native macOS/AppImage must validate/install before runtime shutdown.
-    // before-quit closes the owned tunnel once native installation succeeds.
-    if (!waitsForNativeInstallAcceptance(updaterDistribution)) {
-      const tunnelStopped = await stopTunnelForUpdateInstall(runtime);
-      if (!tunnelStopped) return { accepted: false, status: currentUpdateStatus };
-    }
-
-    const status = patchUpdateStatus({
-      phase: 'installing',
-      message: nativeMessages(desktopLocale).updaterInstallWaiting,
-      canInstall: false,
-    });
-    updateInstallCoordinator.requestInstall();
-    return { accepted: true, status };
-  } finally {
-    updateInstallConfirmationPending = false;
+    const accepted = await consent.requestInstall();
+    return { accepted, status: currentUpdateStatus };
+  } catch (error: unknown) {
+    console.error(`Could not show update confirmation: ${error instanceof Error ? error.message : 'unknown error'}`);
+    return { accepted: false, status: currentUpdateStatus };
   }
+}
+
+function isCurrentDownloadedUpdateOffer(offer: DownloadedUpdateOffer): boolean {
+  const current = currentDownloadedUpdateOffer;
+  return current !== null
+    && currentUpdateStatus.availableVersion === offer.version
+    && current.generation === offer.generation
+    && current.version === offer.version
+    && current.artifactIdentity === offer.artifactIdentity;
 }
 
 async function stopTunnelForUpdateInstall(runtime: DesktopRuntime): Promise<boolean> {
   try {
-    const status = await runtime.services.stopTunnel();
+    const previousStatus = await runtime.services.getTunnelStatus();
+    if (!updateInstallNeedsTunnelStopConfirmation(previousStatus)) return true;
+    updateTunnelRecovery.rememberRunningTunnel(async (): Promise<void> => {
+      const restored = await runtime.services.startTunnel();
+      if (restored.state === 'error' || restored.state === 'stopped') {
+        throw new Error(restored.message ?? `Secure Tunnel did not restart (${restored.state})`);
+      }
+    });
+    const status = await runtime.pauseTunnelForUpdate();
     if (status.state !== 'stopped' || updateInstallNeedsTunnelStopConfirmation(status)) {
       throw new Error(status.message ?? 'Secure Tunnel did not reach the stopped state');
     }
     return true;
   } catch (error: unknown) {
+    const recoveryError = await restoreTunnelAfterUpdateFailure();
+    desktopIpcDrainBarrier.resume();
     const messages = nativeMessages(desktopLocale);
-    const detail = error instanceof Error ? error.message : messages.updaterTunnelStopFailedMessage;
+    const detail = updateInstallFailureDetail(error, recoveryError, messages.updaterTunnelStopFailedMessage);
     patchUpdateStatus({
       phase: 'ready',
       message: messages.updaterTunnelStopFailedMessage,
@@ -1925,6 +1958,31 @@ async function stopTunnelForUpdateInstall(runtime: DesktopRuntime): Promise<bool
     });
     return false;
   }
+}
+
+async function restoreTunnelAfterUpdateFailure(): Promise<string | null> {
+  const recoveryError = await updateTunnelRecovery.restoreAfterFailure();
+  if (recoveryError !== null) console.error(`Secure Tunnel recovery after update failure failed: ${recoveryError}`);
+  return recoveryError;
+}
+
+function updateInstallFailureDetail(error: unknown, recoveryError: string | null, fallback: string): string {
+  const detail = error instanceof Error ? error.message : fallback;
+  return recoveryError === null ? detail : `${detail}\n\nTunnel restart failed: ${recoveryError}`;
+}
+
+async function restoreTunnelAfterInterruptedUpdate(reason: string): Promise<void> {
+  const recoveryError = await restoreTunnelAfterUpdateFailure();
+  desktopIpcDrainBarrier.resume();
+  if (recoveryError === null) return;
+  const messages = nativeMessages(desktopLocale);
+  void dialog.showMessageBox({
+    type: 'error',
+    title: messages.updaterInstallFailedTitle,
+    message: messages.updaterInstallFailedMessage,
+    detail: boundedNativeDialogText(`${reason}\n\nTunnel restart failed: ${recoveryError}`),
+    buttons: [messages.ok],
+  });
 }
 
 function checkForUpdatesFromTray(): void {
@@ -2003,6 +2061,7 @@ function bootstrapMcpStdio(): void {
   const dataPath = configureDataPath();
   void app.whenReady().then(async () => {
     assertSupportedPlatform();
+    await prepareDataPath(dataPath);
     prependBundledRuntimeToolsToPath();
     const secrets = await resolveDesktopRuntimeSecrets(dataPath);
     const runtime = createDesktopRuntime(dataPath, {
@@ -2010,6 +2069,7 @@ function bootstrapMcpStdio(): void {
       hostMutationApprovalProvider: requestMutationApproval,
       nativeCapabilityApi: createElectronNativeCapabilityApi(() => null),
       eccRuntimeOptions: resolveDesktopEccRuntimeOptions(),
+      nativeContainmentDirectory: app.isPackaged ? path.join(process.resourcesPath, 'native-containment') : path.join(app.getAppPath(), 'build', 'native-containment'),
       ...secrets,
       watchToolAvailability: true,
     });
@@ -2091,7 +2151,7 @@ function applyDesktopUserSettings(settings: UserSettings): void {
     });
   }
   if (autoUpdaterInitialized) {
-    autoUpdater.autoDownload = settings.updateAutoDownload;
+    autoUpdater.autoDownload = verifiedAutomaticUpdateAuthority && settings.updateAutoDownload;
     configureUpdateCheckSchedule();
   }
 }
@@ -2108,7 +2168,97 @@ function configureUpdateCheckSchedule(): void {
   updateCheckScheduler.start();
 }
 
-function initAutoUpdater(runtime: DesktopRuntime): void {
+async function installDownloadedUpdate(runtime: DesktopRuntime, offer: DownloadedUpdateOffer): Promise<void> {
+  if (!verifiedAutomaticUpdateAuthority || currentUpdateStatus.phase !== 'installing' || !isCurrentDownloadedUpdateOffer(offer)) return;
+
+  // Stop admitting renderer IPC before stopping Tunnel so no newly accepted
+  // settings or workspace operation can race the install handoff.
+  await desktopIpcDrainBarrier.beginDrain();
+  if (currentUpdateStatus.phase !== 'installing' || !isCurrentDownloadedUpdateOffer(offer)) {
+    desktopIpcDrainBarrier.resume();
+    return;
+  }
+
+  if (!await stopTunnelForUpdateInstall(runtime)) return;
+  if (currentUpdateStatus.phase !== 'installing' || !isCurrentDownloadedUpdateOffer(offer)) {
+    await restoreTunnelAfterInterruptedUpdate('The downloaded update changed before installation began.');
+    return;
+  }
+
+  await installAfterPreUpdateBackup(
+    () => runtime.createBackup('pre-update'),
+    async (): Promise<void> => {
+      if (currentUpdateStatus.phase !== 'installing' || !isCurrentDownloadedUpdateOffer(offer)) {
+        await restoreTunnelAfterInterruptedUpdate('The downloaded update changed before installation began.');
+        return;
+      }
+
+      if (usesElectronUpdaterInstall(updaterDistribution)) {
+        if (updaterDistribution === 'macos') {
+          // Squirrel.Mac validates the signature while the native installer owns
+          // the quit/relaunch sequence. IPC remains drained after Tunnel stops.
+          autoUpdater.quitAndInstall();
+          return;
+        }
+        if (updaterDistribution === 'linux-appimage') {
+          const downloaded = pendingLinuxAppImageUpdate;
+          const installed = process.env.APPIMAGE;
+          if (downloaded === null || downloaded.version !== offer.version
+            || path.resolve(downloaded.downloadedFile) !== offer.artifactIdentity || !installed) {
+            throw new Error('Linux AppImage update is missing its current or downloaded file. Check for updates again.');
+          }
+          const { currentPath, backupPath } = await createLinuxAppImageRollback(installed, downloaded.downloadedFile);
+          let installError = '';
+          const onError = (error: Error): void => { installError = error.message; };
+          autoUpdater.on('error', onError);
+          try {
+            autoUpdater.quitAndInstall();
+          } catch (error: unknown) {
+            installError = error instanceof Error ? error.message : String(error);
+          } finally {
+            autoUpdater.off('error', onError);
+          }
+          if (installError) {
+            try {
+              await restoreLinuxAppImageIfMissing(currentPath, backupPath);
+            } catch (restoreError: unknown) {
+              installError += ` (recovery failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}; backup: ${backupPath})`;
+            }
+            throw new Error(installError);
+          }
+          return;
+        }
+
+        if (desktopShutdownCoordinator === null) throw new Error('Desktop shutdown is not ready for update installation.');
+        const result = await desktopShutdownCoordinator.requestQuit(() => installWindowsUpdate(autoUpdater), 'install');
+        if (result === 'deferred') await restoreTunnelAfterInterruptedUpdate('Desktop shutdown was deferred before update installation.');
+        return;
+      }
+
+      const portableUpdate = pendingPortableUpdate;
+      if (portableUpdate === null || portableUpdate.version !== offer.version
+        || path.resolve(portableUpdate.downloadedFile) !== offer.artifactIdentity) {
+        throw new Error('Portable update file is unavailable or changed. Check for updates again.');
+      }
+      const prepared = await preparePortableReplacement({
+        downloadedFile: portableUpdate.downloadedFile,
+        currentExecutablePath: currentPortableExecutablePath(),
+      });
+      if (currentUpdateStatus.phase !== 'installing' || !isCurrentDownloadedUpdateOffer(offer)) {
+        await restoreTunnelAfterInterruptedUpdate('The downloaded update changed before installation began.');
+        return;
+      }
+      if (desktopShutdownCoordinator === null) throw new Error('Desktop shutdown is not ready for update installation.');
+      const result = await desktopShutdownCoordinator.requestQuit(() => {
+        launchPortableReplacement(prepared);
+        app.quit();
+      }, 'install');
+      if (result === 'deferred') await restoreTunnelAfterInterruptedUpdate('Desktop shutdown was deferred before update installation.');
+    },
+  );
+}
+
+async function initAutoUpdater(runtime: DesktopRuntime): Promise<void> {
   if (!app.isPackaged) {
     patchUpdateStatus({ phase: 'unavailable', message: nativeMessages(desktopLocale).updaterUnavailablePackagedOnly, canInstall: false });
     return;
@@ -2121,10 +2271,17 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
     patchUpdateStatus({ phase: 'unavailable', message: nativeMessages(desktopLocale).updaterUnavailableMacosUnsigned, canInstall: false });
     return;
   }
+  if (autoUpdaterInitialized || autoUpdaterInitializationPending) return;
+  autoUpdaterInitializationPending = true;
   try {
+    const authority = await nativeUpdateBootstrapClient?.automaticCapability() ?? null;
+    verifiedAutomaticUpdateAuthority = hasVerifiedAutomaticUpdateAuthority(authority);
+    if (!verifiedAutomaticUpdateAuthority) {
+      console.warn(`[AutoUpdater] Read-only update checks enabled; installation unavailable (${authority?.kind === 'unavailable' ? authority.reason : 'AUTHORITY_MISSING'}).`);
+    }
     configureUpdaterForDistribution(autoUpdater, windowsDistribution);
     configureUpdaterForPlatform(autoUpdater, updaterDistribution);
-    autoUpdater.autoDownload = desktopUserSettings.updateAutoDownload;
+    autoUpdater.autoDownload = verifiedAutomaticUpdateAuthority && desktopUserSettings.updateAutoDownload;
     autoUpdater.autoInstallOnAppQuit = false;
     updateInstallCoordinator = new UpdateInstallCoordinator({
       activeCallCount: (): number => runtime.activityTracker.listInFlight().length,
@@ -2148,77 +2305,55 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
           ? { state: 'available', activeCallCount: snapshot.activeCount, revision: snapshot.revision, ownerKey: snapshot.ownerKey }
           : { state: snapshot.state, reason: snapshot.reason };
       },
-      maxWaitMs: 5_000,
-      install: (): void => {
-        const ensureTunnelStopped = waitsForNativeInstallAcceptance(updaterDistribution)
-          ? Promise.resolve(true)
-          : stopTunnelForUpdateInstall(runtime);
-        void ensureTunnelStopped.then((tunnelStopped) => {
-          if (!tunnelStopped) return;
-          void runtime.createBackup('pre-update').catch((error: unknown) => {
-            console.error(`Pre-update backup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
-          }).finally(() => {
-            if (usesElectronUpdaterInstall(updaterDistribution)) {
-              if (updaterDistribution === 'macos') {
-                // Squirrel.Mac validates the signature after native checkForUpdates.
-                // Do not enter IPC shutdown before it accepts the replacement.
-                try { autoUpdater.quitAndInstall(); } catch (error: unknown) {
-                  patchUpdateStatus({ phase: 'error', message: error instanceof Error ? error.message : String(error), canInstall: false });
-                }
-              } else if (updaterDistribution === 'linux-appimage') {
-                const downloaded = pendingLinuxAppImageUpdate?.downloadedFile;
-                const installed = process.env.APPIMAGE;
-                if (!downloaded || !installed) {
-                  patchUpdateStatus({ phase: 'error', message: 'Linux AppImage update is missing its current or downloaded file.', canInstall: false });
-                  return;
-                }
-                void createLinuxAppImageRollback(installed, downloaded).then(async ({ currentPath, backupPath }) => {
-                  // electron-updater unlinks the old AppImage before moving the new.
-                  // Its installer is synchronous and emits error for failed moves.
-                  let installError = '';
-                  const onError = (error: Error): void => { installError = error.message; };
-                  autoUpdater.on('error', onError);
-                  try { autoUpdater.quitAndInstall(); } catch (error: unknown) {
-                    installError = error instanceof Error ? error.message : String(error);
-                  } finally {
-                    autoUpdater.off('error', onError);
-                  }
-                  if (installError) {
-                    try {
-                      await restoreLinuxAppImageIfMissing(currentPath, backupPath);
-                    } catch (restoreError: unknown) {
-                      installError += ` (recovery failed: ${restoreError instanceof Error ? restoreError.message : String(restoreError)}; backup: ${backupPath})`;
-                    }
-                    patchUpdateStatus({ phase: 'error', message: installError, canInstall: false });
-                  }
-                }).catch((error: unknown) => {
-                  patchUpdateStatus({ phase: 'error', message: error instanceof Error ? error.message : String(error), canInstall: false });
-                });
-              } else {
-                void desktopShutdownCoordinator?.requestQuit(() => autoUpdater.quitAndInstall(), 'install');
-              }
-              return;
-            }
-            const portableUpdate = pendingPortableUpdate;
-            if (portableUpdate === null) {
-              patchUpdateStatus({ phase: 'error', message: 'Portable update file is unavailable. Check for updates again.', canInstall: false });
-              return;
-            }
-            void preparePortableReplacement({
-              downloadedFile: portableUpdate.downloadedFile,
-              currentExecutablePath: currentPortableExecutablePath(),
-            }).then((prepared) => {
-              void desktopShutdownCoordinator?.requestQuit(() => {
-                launchPortableReplacement(prepared);
-                app.quit();
-              }, 'install');
-            }).catch((error: unknown) => {
-              const message = error instanceof Error ? error.message : 'Portable update could not be prepared.';
-              console.error(`[AutoUpdater] portable install preparation failed: ${message}`);
-              patchUpdateStatus({ phase: 'error', message, canInstall: false });
-            });
-          });
+      install: async (offer: DownloadedUpdateOffer): Promise<void> => installDownloadedUpdate(runtime, offer),
+      onInstallError: async (error: unknown): Promise<void> => {
+        const messages = nativeMessages(desktopLocale);
+        const recoveryError = await restoreTunnelAfterUpdateFailure();
+        const detail = updateInstallFailureDetail(error, recoveryError, messages.updaterInstallFailedMessage);
+        desktopIpcDrainBarrier.resume();
+        if (currentUpdateStatus.phase === 'installing' && currentDownloadedUpdateOffer !== null) {
+          patchUpdateStatus({ phase: 'ready', message: messages.updaterInstallFailedMessage, canInstall: true });
+        }
+        console.error(`Update installation failed: ${detail}`);
+        void dialog.showMessageBox({
+          type: 'error',
+          title: messages.updaterInstallFailedTitle,
+          message: messages.updaterInstallFailedMessage,
+          detail: boundedNativeDialogText(detail),
+          buttons: [messages.ok],
         });
+      },
+    });
+    updateInstallConsentController = new UpdateInstallConsentController({
+      getCurrentOffer: (): DownloadedUpdateOffer | null => currentUpdateStatus.phase === 'ready' ? currentDownloadedUpdateOffer : null,
+      hasPendingInstall: (): boolean => updateInstallCoordinator?.hasPendingInstall() ?? false,
+      confirmVersion: async (version: string): Promise<boolean> => {
+        const messages = nativeMessages(desktopLocale);
+        const options = {
+          type: 'question' as const,
+          title: messages.updaterInstallConfirmTitle,
+          message: messages.updaterInstallConfirmMessage(version),
+          detail: messages.updaterInstallConfirmDetail,
+          buttons: [messages.updaterInstallConfirm, messages.cancel],
+          defaultId: 1,
+          cancelId: 1,
+          noLink: true,
+        };
+        const parent = mainWindow !== null && !mainWindow.isDestroyed() ? mainWindow : null;
+        const result = parent === null
+          ? await dialog.showMessageBox(options)
+          : await dialog.showMessageBox(parent, options);
+        return result.response === 0;
+      },
+      queueInstall: (offer: DownloadedUpdateOffer): boolean => {
+        if (!verifiedAutomaticUpdateAuthority || currentUpdateStatus.phase !== 'ready' || !isCurrentDownloadedUpdateOffer(offer)) return false;
+        if (updateInstallCoordinator?.requestInstall(offer) !== true) return false;
+        patchUpdateStatus({
+          phase: 'installing',
+          message: nativeMessages(desktopLocale).updaterInstallWaiting,
+          canInstall: false,
+        });
+        return true;
       },
     });
 
@@ -2231,7 +2366,10 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
     autoUpdater.on('update-available', (info) => {
       recordUpdaterEvent(`update-available:${info.version}`);
       const requestedFromTray = pendingUpdateCheckSource === 'tray';
+      const requestedByRendererWithoutNativeInstall = pendingUpdateCheckSource === 'renderer' && !verifiedAutomaticUpdateAuthority;
       pendingUpdateCheckSource = null;
+      downloadedUpdateGeneration += 1;
+      currentDownloadedUpdateOffer = null;
       pendingPortableUpdate = null;
       pendingLinuxAppImageUpdate = null;
       console.log(`[AutoUpdater] Update available: v${info.version}`);
@@ -2241,14 +2379,15 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
         availableVersion: info.version,
         progressPercent: 0,
         lastCheckedAt: new Date().toISOString(),
-        message: messages.updateAvailableStatus(info.version),
+        message: verifiedAutomaticUpdateAuthority ? messages.updateAvailableStatus(info.version) : messages.updaterUnavailableTransactionAuthority,
         canInstall: false,
       });
-      if (requestedFromTray) {
+      if (requestedFromTray || requestedByRendererWithoutNativeInstall) {
         void dialog.showMessageBox({
           type: 'info',
           title: messages.updaterAvailableTitle,
           message: boundedNativeDialogText(messages.updateAvailableDialog(info.version)),
+          ...(requestedByRendererWithoutNativeInstall ? { detail: messages.updaterUnavailableTransactionAuthority } : {}),
           buttons: [messages.ok],
         });
       }
@@ -2257,7 +2396,9 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
         timestamp: new Date().toISOString(),
         level: 'info',
         source: 'process',
-        text: `[AutoUpdater] Version v${info.version} is available and downloading in background...`,
+        text: verifiedAutomaticUpdateAuthority
+          ? `[AutoUpdater] Version v${info.version} is available for installation after user confirmation.`
+          : `[AutoUpdater] Version v${info.version} is available; trusted automatic installation is not yet supported.`,
       });
     });
 
@@ -2273,33 +2414,67 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
 
     autoUpdater.on('update-not-available', (info) => {
       recordUpdaterEvent(`update-not-available:${info.version}`);
-      const requestedFromTray = pendingUpdateCheckSource === 'tray';
+      const requestedByUser = pendingUpdateCheckSource === 'tray' || pendingUpdateCheckSource === 'renderer';
       pendingUpdateCheckSource = null;
+      downloadedUpdateGeneration += 1;
+      currentDownloadedUpdateOffer = null;
       const messages = nativeMessages(desktopLocale);
       patchUpdateStatus({
         phase: 'up-to-date',
         availableVersion: null,
         progressPercent: null,
         lastCheckedAt: new Date().toISOString(),
-        message: messages.updateCurrentStatus(info.version),
+        message: messages.updateCurrentStatus(app.getVersion()),
         canInstall: false,
       });
-      if (!requestedFromTray) return;
+      if (!requestedByUser) return;
       void dialog.showMessageBox({
         type: 'info',
         title: messages.updaterCheckTitle,
-        message: boundedNativeDialogText(messages.updateCurrentDialog(info.version)),
+        message: boundedNativeDialogText(messages.updateCurrentDialog(app.getVersion())),
         buttons: [messages.ok],
       });
     });
 
     autoUpdater.on('update-downloaded', (info) => {
       recordUpdaterDownload(info.version);
+      const downloadedFile = typeof info.downloadedFile === 'string' ? info.downloadedFile.trim() : '';
+      downloadedUpdateGeneration += 1;
+      if (!verifiedAutomaticUpdateAuthority) {
+        currentDownloadedUpdateOffer = null;
+        pendingPortableUpdate = null;
+        pendingLinuxAppImageUpdate = null;
+        patchUpdateStatus({
+          phase: 'unavailable',
+          availableVersion: info.version,
+          progressPercent: null,
+          message: nativeMessages(desktopLocale).updaterUnavailableTransactionAuthority,
+          canInstall: false,
+        });
+        return;
+      }
+      if (downloadedFile.length === 0) {
+        currentDownloadedUpdateOffer = null;
+        patchUpdateStatus({
+          phase: 'error',
+          availableVersion: info.version,
+          progressPercent: null,
+          message: nativeMessages(desktopLocale).updaterInstallFailedMessage,
+          canInstall: false,
+        });
+        return;
+      }
+      const downloadedOffer: DownloadedUpdateOffer = {
+        generation: downloadedUpdateGeneration,
+        version: info.version,
+        artifactIdentity: path.resolve(downloadedFile),
+      };
+      currentDownloadedUpdateOffer = downloadedOffer;
       if (windowsDistribution === 'portable') {
-        pendingPortableUpdate = { version: info.version, downloadedFile: info.downloadedFile };
+        pendingPortableUpdate = { version: info.version, downloadedFile };
       }
       if (updaterDistribution === 'linux-appimage') {
-        pendingLinuxAppImageUpdate = { version: info.version, downloadedFile: info.downloadedFile };
+        pendingLinuxAppImageUpdate = { version: info.version, downloadedFile };
       }
       patchUpdateStatus({
         phase: 'ready',
@@ -2308,22 +2483,39 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
         message: nativeMessages(desktopLocale).updateReadyStatus(info.version),
         canInstall: true,
       });
-      console.log(`[AutoUpdater] Downloaded update: v${info.version}; waiting for user action.`);
+      console.log(`[AutoUpdater] Downloaded update: v${info.version}; waiting for exact-version user confirmation.`);
       broadcastToAllWindows(pushChannels.logEvent, {
         id: Date.now(),
         timestamp: new Date().toISOString(),
         level: 'info',
         source: 'process',
-        text: `[AutoUpdater] Update v${info.version} downloaded! Click the version badge to install.`,
+        text: `[AutoUpdater] Update v${info.version} downloaded. Confirm the version badge to install after active work finishes.`,
       });
     });
 
     autoUpdater.on('error', (err) => {
-      const requestedFromTray = pendingUpdateCheckSource === 'tray';
+      const requestedByUser = pendingUpdateCheckSource === 'tray' || pendingUpdateCheckSource === 'renderer';
       pendingUpdateCheckSource = null;
       recordUpdaterEvent(`error:${err.message}`);
       console.error('[AutoUpdater] error:', err.message);
       const messages = nativeMessages(desktopLocale);
+      if (currentUpdateStatus.phase === 'installing' && currentDownloadedUpdateOffer !== null) {
+        void (async (): Promise<void> => {
+          const recoveryError = await restoreTunnelAfterUpdateFailure();
+          desktopIpcDrainBarrier.resume();
+          patchUpdateStatus({ phase: 'ready', message: messages.updaterInstallFailedMessage, canInstall: true });
+          void dialog.showMessageBox({
+            type: 'error',
+            title: messages.updaterInstallFailedTitle,
+            message: messages.updaterInstallFailedMessage,
+            detail: boundedNativeDialogText(updateInstallFailureDetail(err, recoveryError, messages.updaterInstallFailedMessage)),
+            buttons: [messages.ok],
+          });
+        })();
+        return;
+      }
+      downloadedUpdateGeneration += 1;
+      currentDownloadedUpdateOffer = null;
       const message = err.message || messages.updaterCheckFailed;
       patchUpdateStatus({
         phase: 'error',
@@ -2331,7 +2523,7 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
         message,
         canInstall: false,
       });
-      if (!requestedFromTray) return;
+      if (!requestedByUser) return;
       void dialog.showMessageBox({
         type: 'error',
         title: messages.updaterCheckTitle,
@@ -2342,10 +2534,17 @@ function initAutoUpdater(runtime: DesktopRuntime): void {
 
     autoUpdaterInitialized = true;
     configureUpdateCheckSchedule();
+    const cancelledCheck = initializationUpdateChecks.finish(!quitRequested, startUpdateCheck);
+    if (quitRequested && cancelledCheck) {
+      patchUpdateStatus({ phase: 'unavailable', message: nativeMessages(desktopLocale).updaterUnavailable, canInstall: false });
+    }
 
   } catch (err: unknown) {
+    initializationUpdateChecks.finish(false, startUpdateCheck);
     console.error('Failed to initialize auto updater:', err);
     patchUpdateStatus({ phase: 'error', message: err instanceof Error ? err.message : nativeMessages(desktopLocale).updaterCheckFailed, canInstall: false });
+  } finally {
+    autoUpdaterInitializationPending = false;
   }
 }
 
@@ -2553,6 +2752,11 @@ function configureRuntimeDiagnosticsHistory(dataPath: string, runtime: DesktopRu
 }
 
 async function createNativeDesktopRuntime(dataPath: string): Promise<DesktopRuntime> {
+  // Recover exact local profile artifacts from an interrupted alias removal
+  // before reading any secrets or starting Tunnel lifecycle operations.
+  await new TunnelAliasRetirementJournal(
+    tunnelAliasRecoveryDirectory(dataPath), resolveTunnelProfileDirectory(),
+  ).recover();
   recordDesktopStartup('runtime-secrets:begin');
   const secrets = await resolveDesktopRuntimeSecrets(dataPath);
   recordDesktopStartup('runtime-secrets:end');
@@ -2562,6 +2766,7 @@ async function createNativeDesktopRuntime(dataPath: string): Promise<DesktopRunt
     ...secrets,
     nativeCapabilityApi: createElectronNativeCapabilityApi(() => mainWindow),
     eccRuntimeOptions: resolveDesktopEccRuntimeOptions(),
+    nativeContainmentDirectory: app.isPackaged ? path.join(process.resourcesPath, 'native-containment') : path.join(app.getAppPath(), 'build', 'native-containment'),
     collectIncidentMemory,
     captureRuntimeDiagnostics: () => { runtimeDiagnosticsHistory?.captureNow(); },
     ...(desktopLogSession === null ? {} : {
@@ -2767,6 +2972,7 @@ function bootstrapDesktop(configuredDataPath?: string): void {
   void app.whenReady().then(async () => {
     recordDesktopStartup('app-ready:resolved');
     assertSupportedPlatform();
+    await prepareDataPath(dataPath);
     app.setAppUserModelId('com.lnwjud.desktop');
     const session = platformCompatibility.linuxSession;
     console.log(
@@ -2809,7 +3015,7 @@ function bootstrapDesktop(configuredDataPath?: string): void {
     void runtime.autoStartRemoteMcp().catch((error: unknown) => {
       console.error(`Remote MCP persistent runtime auto-start failed: ${error instanceof Error ? error.message : 'unknown error'}`);
     });
-    initAutoUpdater(runtime);
+    void initAutoUpdater(runtime);
     app.on('activate', () => {
       revealMainWindow();
     });
@@ -2825,6 +3031,7 @@ function bootstrapLogViewerOnly(configuredDataPath?: string): void {
   if (platformCompatibility.disableHardwareAcceleration) app.disableHardwareAcceleration();
   void app.whenReady().then(async () => {
     assertSupportedPlatform();
+    await prepareDataPath(dataPath);
     app.setAppUserModelId('com.lnwjud.desktop');
     prependBundledRuntimeToolsToPath();
     const runtime = await createNativeDesktopRuntime(dataPath);
@@ -3066,6 +3273,15 @@ function configureDataPath(configuredDataPath?: string): string {
   const dataPath = configuredDataPath ?? configureUserDataPath();
   configureCrashRecovery(dataPath);
   recordDesktopStartup('data-path:configured');
+  return dataPath;
+}
+
+export async function prepareDataPath(dataPath: string): Promise<void> {
+  if (app.isPackaged) {
+    nativeUpdateBootstrapClient = createNativeUpdateBootstrapClient(dataPath, process.execPath, process.resourcesPath);
+    const recovery = await nativeUpdateBootstrapClient.recoverBeforeStartup();
+    if (recovery.kind === 'held') throw new Error(`Update recovery holds writable startup (${recovery.reason})`);
+  }
   recordDesktopStartup('restore:begin');
   const restore = applyPendingSqliteRestoreSync(path.join(dataPath, 'lnwjud.sqlite'), path.join(dataPath, 'backups'), {
     platform: process.platform,
@@ -3078,7 +3294,6 @@ function configureDataPath(configuredDataPath?: string): string {
   recordDesktopStartup('restore:end');
   if (restore.error !== undefined) console.error(`Scheduled database restore failed: ${restore.error}`);
   if (restore.applied) console.log(`Database restore applied from ${restore.backupId ?? 'scheduled backup'}`);
-  return dataPath;
 }
 
 const factoryResetApplyRequested = process.argv.includes(FACTORY_RESET_APPLY_ARG);

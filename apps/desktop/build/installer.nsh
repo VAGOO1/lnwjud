@@ -1,4 +1,36 @@
 !macro customInstall
+  ; The LocalSystem containment service belongs only to a protected all-users install.
+  ${if} $installMode == "all"
+    ; Capture a stable, path-free native failure code for troubleshooting.
+    nsExec::ExecToStack '"$INSTDIR\resources\native-containment\lnwjud-containment.exe" service-install'
+    Pop $0
+    Pop $1
+    ${if} $0 == "error"
+      StrCpy $0 "125"
+    ${endIf}
+    ${if} $0 != 0
+      ${if} $1 == ""
+        StrCpy $1 "SERVICE_INSTALL_UNEXPECTED"
+      ${endIf}
+      IfSilent silentInstallFailure 0
+      MessageBox MB_ICONSTOP|MB_OK "Windows containment service installation failed (exit code $0, reason $1). lnwjud requires this protected service for managed tasks."
+      Abort
+      silentInstallFailure:
+        SetErrorLevel $0
+        Abort
+    ${endIf}
+  ${else}
+    ; Per-user installs cannot register the required LocalSystem containment service.
+    ; Fail a silent installation instead of reporting a protected install that cannot function.
+    IfSilent unsupportedPerUserSilent 0
+    MessageBox MB_ICONEXCLAMATION|MB_OK "Current-user mode cannot install the protected Windows containment service. Managed tasks will remain unavailable. For managed tasks, restart setup and select All Users."
+    Goto acknowledgedPerUserMode
+    unsupportedPerUserSilent:
+      SetErrorLevel 125
+      Abort
+    acknowledgedPerUserMode:
+  ${endIf}
+
   ; Resolve the shortcut from the actual end-user install directory at install time.
   SetOutPath "$INSTDIR"
   CreateDirectory "$SMPROGRAMS"
@@ -22,6 +54,25 @@
 !macroend
 
 !macro customUnInstall
+  ${if} $installMode == "all"
+    nsExec::ExecToStack '"$INSTDIR\resources\native-containment\lnwjud-containment.exe" service-uninstall'
+    Pop $0
+    Pop $1
+    ${if} $0 == "error"
+      StrCpy $0 "125"
+    ${endIf}
+    ${if} $0 != 0
+      ${if} $1 == ""
+        StrCpy $1 "SERVICE_REMOVE_UNEXPECTED"
+      ${endIf}
+      IfSilent silentUninstallFailure 0
+      MessageBox MB_ICONSTOP|MB_OK "Windows containment service removal failed (exit code $0, reason $1). The application files were left in place."
+      Abort
+      silentUninstallFailure:
+        SetErrorLevel $0
+        Abort
+    ${endIf}
+  ${endIf}
   Delete "$SMPROGRAMS\lnwjud.lnk"
   ; Silent updates/uninstalls must never block on an interactive prompt. Preserve user data by default.
   IfSilent keepData 0

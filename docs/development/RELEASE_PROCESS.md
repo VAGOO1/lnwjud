@@ -44,15 +44,34 @@ system is never evidence for another.
    relevant checks, and repeat the merge/release sequence. Do not weaken tests,
    security settings, provenance checks, or branch protection.
 9. Every public GitHub Release body begins with human-written, version-specific
-   `## Highlights` from the matching README `What's new in vX.Y.Z` section.
+   `## Highlights` from the matching `RELEASE_NOTES.md` `What's new in vX.Y.Z` section.
    The generator adds factual Feature, Bug Fix, and Other Change entries from
    linked PRs and commits, then one `**Full Changelog**` link. It omits empty
-   categories instead of publishing `- None.`. A release with no README bullets
+   categories instead of publishing `- None.`. A release with no curated release-history bullets
    or no substantive change evidence fails before publication.
 10. Every application release also has a non-empty, exact-version entry in
     the in-app What's New registry, with Thai and English text. README and
     GitHub Release notes do not populate the in-app modal. The Desktop release
     notes test must fail when the current package version has no in-app entry.
+11. For releases that advertise **automatic update installation**, do not tag or publish until the exact successful `main` CI run and attempt
+    produce and validate signed updater acceptance receipts for Windows x64,
+    macOS arm64, and macOS x64. Each receipt must bind the exact `main` SHA,
+    workflow run ID and attempt, package and feed digests, and signing identity.
+    It must prove exactly one accepted confirmation of the exact target version,
+    followed by silent installation with zero interactive installer prompts or
+    Next pages, while retaining OS security authorization. It must also prove
+    installation over an older signed build, automatic restart,
+    exact resulting version and health, Tunnel restoration, and rollback to
+    the previous healthy build after an injected update failure, followed by
+    another health check and Tunnel restoration. Missing, duplicate, stale-run,
+    unsigned, manually authored, or verifier-only receipts fail this gate. A
+    build, unit test, update-feed check, or ordinary installer run is not
+    updater acceptance. The current release verifier rejects every structurally
+    valid updater receipt because an authenticated producer and independent
+    observation verifier are not implemented yet. Do not enable or advertise automatic updates until
+    those components and real target-native acceptance are verified.
+
+**Manual-only v5.9.0 exception:** This release does not advertise or enable automatic installation. The version-locked `config/release-scope.json` permits only Windows x64 and Linux x64/arm64; macOS is withheld pending Issue #216. `scripts/verify-manual-release-scope.mjs` requires a fail-closed Desktop updater and empty update authority enrollment. Exact-main security/packaging tests, artifact provenance/hashes, and protected PRs remain mandatory. Genuine signed installation, restart and rollback receipts remain mandatory before any **future release enables** unattended updates; this manual mode does not treat self-reported fixtures as valid receipts.
 
 ## Post-publication documentation synchronization
 
@@ -62,9 +81,9 @@ After GitHub Release `vX.Y.Z` is public and verified, but **before starting the 
 
 Release notes are not free-form. Before tagging, write at least one clear,
 user-facing bullet under the exact-version `### What's new in vX.Y.Z` heading
-in `README.md`. Describe what users can do or what problem is fixed; a version
+in `RELEASE_NOTES.md`. Describe what users can do or what problem is fixed; a version
 bump, CI commit hash, or artifact list alone is insufficient. The tag workflow
-generates notes with `scripts/release-notes.mjs`, checks this README section,
+generates notes with `scripts/release-notes.mjs`, checks this release-history section,
 and validates it immediately after the tag/version check, before waiting for
 or downloading release artifacts. It publishes the generated file as the
 GitHub Release body.
@@ -116,12 +135,12 @@ Changelog lines, and preserves release/provenance metadata under **Other
 Changes**. Do not hand-replace the generated body with `## What's Changed` or a
 different heading scheme after publication.
 
-Keep the three newest release highlights in `README.md` and `FULL_README.md`.
-Move older highlights to `RELEASE_NOTES.md` without dropping their detail.
-When preparing a new version, add its exact-version highlights to both READMEs
-and the release history, and remove the oldest README entry in that same change
-so the three-version limit holds before CI. The generator uses the current
-`README.md` section for a new release and `RELEASE_NOTES.md` for historical
+Keep version-specific highlights in `RELEASE_NOTES.md` and the in-app What's New registry.
+Do not add per-version changelog sections to `README.md` or `FULL_README.md`.
+When preparing a new version, add its exact-version highlights to the release history
+and the in-app release notes, and validate the version-specific release notes
+before CI. The generator uses the current
+`RELEASE_NOTES.md` section for new releases and historical
 backfill.
 
 Historical cleanup uses `node scripts/release-notes.mjs --backfill --repository
@@ -188,7 +207,7 @@ full verification gate.
 - Set the release version by running `corepack pnpm@10.15.0 run set-version <version>` first. The script is the canonical version-sync path; do not begin by hand-editing packages or current-version docs. Inspect the resulting diff for drift, and use manual edits only for uncovered references. If an uncovered reference is part of the canonical current-version surface, extend `scripts/set-version.mjs` in the same change so future bumps stay automated. Do not reuse an existing public tag; this cross-platform target uses a new version when the prior Windows tag already exists.
 - Finish and locally verify functional behavior before changing the version. Keep the mechanical version-sync diff separate from unrelated runtime changes where practical so a failure has one obvious cause.
 - Run `corepack pnpm@10.15.0 test:version` immediately after `set-version`. This fast contract checks package/source alignment, development versus published documentation, local artifact names, and invalid version rejection.
-- Update README release-specific copy such as `What's new` when needed. Historical release details stay in GitHub Release notes and are not rewritten by the version script.
+- Keep README and FULL_README focused on product documentation; publish version Highlights in `RELEASE_NOTES.md`, the in-app modal and GitHub Releases.
 - Update tool-count and target-artifact assertions when the catalog or release
   matrix changes.
 - Run `git diff --check` and keep source provenance clean before the
@@ -276,9 +295,11 @@ branch as mergeable/up to date under the configured protection rules.
 Merge through the protected-branch path and record the resulting exact `main`
 SHA. The authoritative CI for that exact SHA normally comes from the `main`
 push. If no push-event run is created because the protected merge credential
-suppresses downstream Actions, manually dispatch `ci.yml` with `main` as the
-ref and verify that the run's `headSha` is still the exact SHA being prepared
-for release. In either case, the run must complete all of these target boundaries:
+suppresses downstream Actions, a manual-install release may dispatch `ci.yml`
+with `main` as the ref and verify that the run's `headSha` is still the exact
+SHA being prepared for release. A release that enables automatic updates must
+use the main-push run because it carries the update package attestation. In
+either case, the run must complete all of these target boundaries:
 
 - The full Windows workspace suite and the remaining Windows release gate both
   succeed. The build job uploads `windows-release-<main merge SHA>` and their
@@ -311,12 +332,13 @@ After all exact-SHA `main` jobs succeed, verify that the intended `vX.Y.Z` tag
 does not already exist. Create the tag at that exact `main` SHA and push it.
 Never force-replace an existing public release tag.
 
-The Release workflow checks the package-version/tag match, locates the
-successful exact-SHA `ci.yml` push run or, when necessary, the successful
-exact-main `workflow_dispatch` fallback, downloads every target artifact,
-and invokes `apps/desktop/scripts/verify-release-evidence.mjs` with an explicit
-installer directory for each target. `scripts/collect-release-assets.mjs`
-then produces:
+The Release workflow checks the package-version/tag match and locates a
+successful exact-SHA `ci.yml` push run. For manual-install releases only, it may
+use a successful exact-main `workflow_dispatch` fallback; automatic-update
+releases require the push run and its update package attestation. It downloads
+every target artifact and invokes `apps/desktop/scripts/verify-release-evidence.mjs`
+with an explicit installer directory for each target.
+`scripts/collect-release-assets.mjs` then produces:
 
 - target packages and updater metadata;
 - `PROVENANCE-<platform>-<arch>.json` and

@@ -212,6 +212,7 @@ test.describe('Tools catalog and Doctor real Electron acceptance', () => {
   });
 
   test('missing LSP dependency is needs_setup and explains the real requirement', async () => {
+    test.setTimeout(process.env.CI ? 150_000 : 30_000);
     const app = await launchDesktop();
     try {
       await openTools(app.page);
@@ -255,7 +256,7 @@ test.describe('Tools catalog and Doctor real Electron acceptance', () => {
       const card = toolCard(app.page, 'delete_file');
       await expect(card).toHaveClass(/tool-blocked/);
       await card.locator('button.tool-card-open').click();
-      await expect(app.page.getByRole('dialog')).toContainText('DENY');
+      await expect(app.page.getByRole('dialog')).toContainText('DENY', { timeout: process.env.CI ? 20_000 : 5_000 });
       await app.page.getByRole('button', { name: /ปิดรายละเอียดเครื่องมือ|Close tool details/ }).click();
       const after = await app.page.evaluate(async () => (await window.lnwjud.getDashboard()).auditEventCount);
       expect(after).toBe(before);
@@ -414,7 +415,7 @@ async function launchDesktop(options: { readonly dataRoot?: string; readonly fix
   let browser: Browser | undefined;
   try {
     await waitForDevTools(devToolsPort, process, stderr);
-    browser = await chromium.connectOverCDP(`http://127.0.0.1:${devToolsPort}`);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${devToolsPort}`, { timeout: globalThis.process.env.CI ? 90_000 : 30_000 });
     const context = browser.contexts()[0];
     if (context === undefined) throw new Error('Electron did not create a browser context');
     // CDP is available before native storage/runtime initialization creates

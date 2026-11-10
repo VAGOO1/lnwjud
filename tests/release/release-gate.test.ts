@@ -20,9 +20,10 @@ describe('MVP release verification gate', () => {
       }
       const workflow = await readFile(path.join(repositoryRoot, '.github/workflows/release.yml'), 'utf8');
       const preparation = workflow.split('- name: Verify each downloaded release evidence bundle')[0] ?? '';
-      for (const command of preparation.matchAll(/^\s+run: node ([\w/.-]+)\s*$/gm)) {
-        await promisify(execFile)(process.execPath, [path.join(root, command[1] ?? '')], { cwd: root, windowsHide: true });
-      }
+      // This isolated checkout exercises only the bridge generator; policy checks
+      // run against a complete, exact-version release checkout in their own gate.
+      expect(preparation).toContain('run: node apps/desktop/scripts/write-capability-integrity.mjs');
+      await promisify(execFile)(process.execPath, [path.join(root, 'apps/desktop/scripts/write-capability-integrity.mjs')], { cwd: root, windowsHide: true });
       const { verifyCapabilityBridgeArtifacts } = await import('../../apps/desktop/scripts/verify-capability-bridge-artifacts.mjs');
       const identity = await verifyCapabilityBridgeArtifacts({
         sourcePath: path.join(root, 'packages/capabilities/src/windows-capability-bridge.ps1'),
@@ -156,11 +157,12 @@ describe('MVP release verification gate', () => {
     expect(buildJob).toContain("if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'");
     expect(buildJob).toContain('windows-release-${{ github.sha }}');
     expect(requiredJob).toContain('name: Authoritative Release Verification (Windows)');
-    expect(requiredJob).toContain('needs: [windows-release-tests, windows-release-build]');
+    expect(requiredJob).toContain('needs: [windows-release-tests, windows-release-build, update-package-attestation]');
     expect(requiredJob).toContain('WORKSPACE_TESTS_RESULT: ${{ needs.windows-release-tests.result }}');
     expect(requiredJob).toContain('BUILD_RESULT: ${{ needs.windows-release-build.result }}');
-    expect(requiredJob).toContain('test "$WORKSPACE_TESTS_RESULT" = success');
-    expect(requiredJob).toContain('test "$BUILD_RESULT" = success');
+    expect(requiredJob).toContain('process.env.WORKSPACE_TESTS_RESULT === "success"');
+    expect(requiredJob).toContain('process.env.BUILD_RESULT === "success"');
+    expect(requiredJob).toContain('process.env.UPDATE_PACKAGE_RESULT === (process.env.UPDATE_PACKAGE_REQUIRED === "true" ? "success" : "skipped")');
   });
 
   it('does not repeat the full Windows verification gate on direct non-main pushes', async () => {
@@ -237,11 +239,13 @@ describe('MVP release verification gate', () => {
     expect(release).toContain('--commit "$sha"');
     expect((release.match(/--branch main/g) ?? []).length).toBe(1);
     expect(release).toContain('candidate="$(find_ci_run push)"');
-    expect(release).toContain('candidate="$(find_ci_run workflow_dispatch)"');
+    expect(release).toContain('scope.automaticUpdaterEnabled !== false');
+    const dispatchFallback = release.match(/if \[\[ -z "\$candidate" && "\$automatic_updater_enabled" != "true" \]\]; then\s+candidate="\$\(find_ci_run workflow_dispatch\)"\s+fi/);
+    expect(dispatchFallback).not.toBeNull();
     expect(release).toContain('gh run download');
     expect(release).toContain('windows-release-$sha');
-    expect(release).toContain('native-darwin-arm64-$sha');
-    expect(release).toContain('native-darwin-x64-$sha');
+    expect(release).not.toContain('native-darwin-arm64-$sha');
+    expect(release).not.toContain('native-darwin-x64-$sha');
     expect(release).toContain('native-linux-x64-$sha');
     expect(release).toContain('native-linux-arm64-$sha');
     expect(release).toContain('ci_wait_deadline=$((SECONDS + 3600))');

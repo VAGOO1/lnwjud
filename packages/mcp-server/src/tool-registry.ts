@@ -72,17 +72,19 @@ import { capabilityTools } from './tools/capability-tools.js';
 import { fileTools } from './tools/file-tools.js';
 import { engineeringTools } from './tools/engineering-tools.js';
 import { gitTools } from './tools/git-tools.js';
-import { goalTools } from './tools/goal-tools.js';
+import { goalTools, GOAL_TOOL_NAMES } from './tools/goal-tools.js';
 import { observedMutationReceipt } from './task-mutation-receipt.js';
 import { workflowTools } from './tools/workflow-tools.js';
 import { mcpBridgeTools } from './tools/mcp-bridge-tools.js';
 import { processTools } from './tools/process-tools.js';
 import { sessionTools } from './tools/session-tools.js';
 import { searchTools } from './tools/search-tools.js';
-import { scheduledContinuationTools } from './tools/scheduled-continuation-tools.js';
+import { scheduledContinuationTools, SCHEDULED_CONTINUATION_TOOL_NAMES } from './tools/scheduled-continuation-tools.js';
 import { skillTools } from './tools/skill-tools.js';
 import { workspaceTools } from './tools/workspace-tools.js';
 import type { McpApplicationServices, McpInternalInvocationContext, McpToolContext, McpToolDefinition } from './tools/tool-types.js';
+import { workspaceWriterLeaseProofSchema } from './tools/schemas.js';
+import type { WorkspaceWriterLeaseProof } from '@lnwjud/capabilities';
 import {
   engineeringTaskBindingSchema,
   goalLeaseProofSchema,
@@ -276,7 +278,7 @@ export class ToolRegistry {
     const contextServices = automation === undefined ? services : { ...services, automation };
     const context: McpToolContext = {
       services: contextServices,
-      actor,
+      actor: { ...actor, sessionId: this.sessionId ?? actor.sessionId ?? actor.clientId },
       contextEconomy,
       registryRuntime: {
         profile: () => this.permissionProfile(),
@@ -457,7 +459,7 @@ export class ToolRegistry {
     const authorizationMode: AuthorizationMode = fullBypass ? 'full_bypass' : 'standard';
     const activityWorkspaceId = await this.resolveActivityWorkspaceId(name, input);
     const workspaceActivityInput = withActivityWorkspaceId(
-      stripEngineeringTaskEnvelope(stripGoalLeaseEnvelope(input)),
+      stripEngineeringTaskEnvelope(stripGoalLeaseEnvelope(stripWorkspaceWriterLeaseEnvelope(input))),
       activityWorkspaceId,
     );
     const activityInput = this.withRememberedActivityTarget(name, workspaceActivityInput);
@@ -469,6 +471,7 @@ export class ToolRegistry {
     );
     const started = Date.now();
     let fencedMutationEnd: (() => Promise<void>) | undefined;
+    let workspaceWriterLeaseEnd: (() => Promise<void>) | undefined;
     try {
       if (invocationGuardMessage !== null) {
         const response = mapError(appError('CONFLICT', invocationGuardMessage, true));
@@ -488,8 +491,9 @@ export class ToolRegistry {
         return response;
       }
       const goalLease = readGoalLeaseProof(parsed.value);
+      const writerLease = readWorkspaceWriterLeaseProof(parsed.value);
       const engineeringTask = readEngineeringTaskBinding(parsed.value);
-      const parsedInput = stripEngineeringTaskEnvelope(stripGoalLeaseEnvelope(parsed.value));
+      const parsedInput = stripEngineeringTaskEnvelope(stripGoalLeaseEnvelope(stripWorkspaceWriterLeaseEnvelope(parsed.value)));
       const goalBound = bindInvocationToGoal(tool.name, parsedInput, goalLease);
       if (!goalBound.ok) {
         await this.activity.end(callId, goalBound.error.code, Date.now() - started, goalBound.error.message);
@@ -563,7 +567,9 @@ export class ToolRegistry {
         const code = permissionDecision === 'DENY' ? 'PERMISSION_DENIED' : 'PERMISSION_REQUIRED';
         const message = permissionDecision === 'DENY'
           ? 'MCP tool ' + tool.name + ' is denied by the active permission profile'
-          : 'MCP tool ' + tool.name + ' requires permission approval';
+          : tool.name === 'mcp_call'
+            ? 'Direct mcp_call requires explicit userConfirmed: true and trusted host exact-action approval; mcp_describe is read-only and tool_batch cannot bypass this child gate'
+            : 'MCP tool ' + tool.name + ' requires permission approval';
         const response = mapError(appError(code, message, permissionDecision === 'ASK'));
         await this.activity.end(callId, code, Date.now() - started, message);
         return response;
@@ -616,8 +622,8 @@ export class ToolRegistry {
       if (hostApprovalRequired && !policyAllowsScopedDestructive) {
         if (this.hostMutationApprovalProvider === undefined) {
           const message = 'Host exact-action approval is unavailable for this mutation; use Desktop or a trusted host approval adapter';
-          const response = mapError(appError('PERMISSION_DENIED', message));
-          await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, message);
+          const response = mapError({ ...appError('PERMISSION_DENIED', message), details: { denialSource: 'host_approval_adapter', approvalState: 'unavailable' } });
+          await this.activity.end(callId, 'HOST_APPROVAL_UNAVAILABLE', Date.now() - started, message);
           return response;
         }
         let hostApproved = false;
@@ -635,8 +641,8 @@ export class ToolRegistry {
         }
         if (!hostApproved) {
           const message = 'The host denied or could not verify exact-action approval for this mutation';
-          const response = mapError(appError('PERMISSION_DENIED', message));
-          await this.activity.end(callId, 'PERMISSION_DENIED', Date.now() - started, message);
+          const response = mapError({ ...appError('PERMISSION_DENIED', message), details: { denialSource: 'host_approval_adapter', approvalState: 'denied_or_unverified' } });
+          await this.activity.end(callId, 'HOST_APPROVAL_DENIED_OR_UNVERIFIED', Date.now() - started, message);
           return response;
         }
       }
@@ -680,6 +686,28 @@ export class ToolRegistry {
         }
         this.activity.bindVerifiedGoal(callId, goalLease.goalId);
       }
+      if (mutationDecision.kind !== 'read'
+        && mutationFenceWorkspaceId !== undefined
+        && !WORKSPACE_WRITER_LEASE_CONTROL_TOOLS.has(tool.name)
+        && !GOAL_AND_CONTINUATION_CONTROL_TOOLS.has(tool.name)
+        && this.services.workspaceWriterLease !== undefined) {
+        const admitted = await this.services.workspaceWriterLease.begin(
+          mutationFenceWorkspaceId,
+          this.actor.clientId,
+          this.sessionId ?? this.actor.sessionId ?? this.actor.clientId,
+          callId,
+          writerLease,
+        );
+        if (!admitted.ok) {
+          await this.activity.end(callId, admitted.error.code, Date.now() - started, admitted.error.message);
+          return mapError(admitted.error);
+        }
+        workspaceWriterLeaseEnd = admitted.value.required
+          ? startWorkspaceWriterLeaseHeartbeat(
+            this.services.workspaceWriterLease, mutationFenceWorkspaceId, callId, admitted.value.generation,
+          )
+          : (): Promise<void> => this.services.workspaceWriterLease!.end(mutationFenceWorkspaceId, callId, admitted.value.generation);
+      }
       const resolvedActivityInput = this.withRememberedActivityTarget(
         name,
         withActivityWorkspaceId(approvalExecutionInput, activityWorkspaceId),
@@ -695,7 +723,9 @@ export class ToolRegistry {
       });
       const execution = await this.executeWithinResponseBudget(
         tool,
-        approvalExecutionInput,
+        WORKSPACE_WRITER_LEASE_CONTROL_TOOLS.has(tool.name) && writerLease !== undefined && isRecord(approvalExecutionInput)
+          ? { ...approvalExecutionInput, writerLease }
+          : approvalExecutionInput,
         invocationAuthorization,
         parentSignal,
         goalLease === undefined ? undefined : goalLease.goalId,
@@ -719,18 +749,25 @@ export class ToolRegistry {
       const resultDetail = describeStructuredResultDetail(response.structuredContent ?? response.content);
       if (execution.deferredSettlement !== undefined) {
         const endFence = fencedMutationEnd;
+        const endWriterLease = workspaceWriterLeaseEnd;
         fencedMutationEnd = undefined;
+        workspaceWriterLeaseEnd = undefined;
         void execution.deferredSettlement.then(async () => {
+          await endWriterLease?.();
           await endFence?.();
           await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail, observedMutationReceipt(name, response));
         });
       } else {
+        await workspaceWriterLeaseEnd?.();
+        workspaceWriterLeaseEnd = undefined;
         await fencedMutationEnd?.();
         fencedMutationEnd = undefined;
         await this.activity.end(callId, resultCode, Date.now() - started, resultMessage, resultDetail, observedMutationReceipt(name, response));
       }
       return response;
     } catch (error: unknown) {
+      await workspaceWriterLeaseEnd?.().catch(() => undefined);
+      workspaceWriterLeaseEnd = undefined;
       await fencedMutationEnd?.().catch(() => undefined);
       fencedMutationEnd = undefined;
       let sanitizedDiagnostic: unknown;
@@ -746,6 +783,9 @@ export class ToolRegistry {
         describeStructuredResultDetail(sanitizedDiagnostic),
       );
       return response;
+    } finally {
+      await workspaceWriterLeaseEnd?.().catch(() => undefined);
+      await fencedMutationEnd?.().catch(() => undefined);
     }
   }
 
@@ -1338,8 +1378,9 @@ function normalizeActiveWorkspaceScopesProvider(options: ActiveWorkspaceScopeOpt
 const NATIVE_ACTIVE_SCOPE_TOOLS = new Set(['dom_cdp', 'office', 'audio', 'screen_record', ...OFFICE_SEMANTIC_TOOL_NAMES]);
 const COMMAND_EXECUTION_TOOLS = new Set(['shell', 'wsl_exec', 'process_start']);
 export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
-  'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file',
-  'restore_deleted_file', 'restore_checkpoint', 'lsp_rename', 'git', 'shell', 'wsl_exec',
+  'engineering_build_artifact', 'engineering_complete_build', 'engineering_upload_worker',
+  'workspace_register', 'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file',
+  'restore_deleted_file', 'restore_checkpoint', 'lsp_rename', 'git', 'git_clone_safe', 'git_clone_cancel', 'shell', 'wsl_exec',
   'process_start', 'process_stop', 'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build',
   'verify_incremental', 'codex_run', 'codex_stop', 'agent_swarm_run', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply',
   'computer_use', 'dom_cdp', 'accessibility', 'input_event', 'ui_target_action', 'window',
@@ -1348,9 +1389,17 @@ export const SCHEDULED_CONTINUATION_FENCED_TOOLS = new Set([
   'task_create', 'benchmark_run', 'recipe_run', 'debug_attach', 'debug_step',
   ...AUTOMATION_TOOL_NAMES.filter((name) => AUTOMATION_MUTATION_TOOL_NAMES.has(name)),
 ]);
+const WORKSPACE_WRITER_LEASE_CONTROL_TOOLS = new Set([
+  'workspace_writer_lease_acquire', 'workspace_writer_lease_status',
+  'workspace_writer_lease_renew', 'workspace_writer_lease_release',
+]);
+const GOAL_AND_CONTINUATION_CONTROL_TOOLS = new Set<string>([
+  ...GOAL_TOOL_NAMES,
+  ...SCHEDULED_CONTINUATION_TOOL_NAMES,
+]);
 const ENGINEERING_GUARDED_MUTATION_TOOLS = new Set([
   'write_file', 'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'restore_deleted_file', 'restore_checkpoint',
-  'lsp_rename', 'git', 'shell', 'wsl_exec', 'process_start', 'process_stop',
+  'lsp_rename', 'git', 'git_clone_safe', 'git_clone_cancel', 'shell', 'wsl_exec', 'process_start', 'process_stop',
   'project_dev', 'project_test', 'project_lint', 'project_typecheck', 'project_build', 'verify_incremental',
   'codex_run', 'codex_stop', 'agent_swarm_run', 'git_worktree_spawn', 'git_worktree_remove', 'self_heal_apply', 'task_create', 'benchmark_run', 'recipe_run', 'debug_attach', 'debug_step',
 ]);
@@ -1361,7 +1410,7 @@ const approvalEnvelopeSchema = z.boolean();
 const GOAL_MUTATION_HEARTBEAT_MS = 10_000;
 
 function withToolEnvelopes(tool: McpToolDefinition): McpToolDefinition {
-  return withApprovalEnvelope(withEngineeringTaskEnvelope(withGoalLeaseEnvelope(tool)));
+  return withApprovalEnvelope(withEngineeringTaskEnvelope(withGoalLeaseEnvelope(withWorkspaceWriterLeaseEnvelope(tool))));
 }
 
 function withApprovalEnvelope(tool: McpToolDefinition): McpToolDefinition {
@@ -1427,7 +1476,43 @@ function withEngineeringTaskEnvelope(tool: McpToolDefinition): McpToolDefinition
   };
 }
 
+function withWorkspaceWriterLeaseEnvelope(tool: McpToolDefinition): McpToolDefinition {
+  if (WORKSPACE_WRITER_LEASE_CONTROL_TOOLS.has(tool.name)
+    || GOAL_AND_CONTINUATION_CONTROL_TOOLS.has(tool.name)
+    || (tool.permission === 'READ' && !SCHEDULED_CONTINUATION_FENCED_TOOLS.has(tool.name))) return tool;
+  const extend = (schema: z.ZodObject): z.ZodObject =>
+    schema.safeExtend({ writerLease: workspaceWriterLeaseProofSchema.optional() });
+  const inputSchema = tool.inputSchema instanceof z.ZodObject
+    ? extend(tool.inputSchema)
+    : tool.inputSchema instanceof z.ZodUnion
+      ? z.union(tool.inputSchema.options.map((entry) => {
+        if (!(entry instanceof z.ZodObject)) throw new Error('Writer-fenced tool must have object input');
+        return extend(entry);
+      }) as [z.ZodObject, z.ZodObject, ...z.ZodObject[]])
+      : undefined;
+  if (inputSchema === undefined) throw new Error('Writer-fenced tool must have object input');
+  return {
+    ...tool, inputSchema,
+    parse(input: unknown): ReturnType<McpToolDefinition['parse']> {
+      const raw = isRecord(input) ? input.writerLease : undefined;
+      const proof = raw === undefined ? undefined : workspaceWriterLeaseProofSchema.safeParse(raw);
+      if (proof !== undefined && !proof.success) return err(appError('INVALID_INPUT', 'writerLease is invalid'));
+      const parsed = tool.parse(stripWorkspaceWriterLeaseEnvelope(input));
+      if (!parsed.ok || proof === undefined) return parsed;
+      if (!isRecord(parsed.value)) return err(appError('INVALID_INPUT', 'Writer-fenced input must be an object'));
+      return ok({ ...parsed.value, writerLease: proof.data });
+    },
+  };
+}
+
+function readWorkspaceWriterLeaseProof(input: unknown): WorkspaceWriterLeaseProof | undefined {
+  if (!isRecord(input) || input.writerLease === undefined) return undefined;
+  const proof = workspaceWriterLeaseProofSchema.safeParse(input.writerLease);
+  return proof.success ? proof.data : undefined;
+}
+
 function withGoalLeaseEnvelope(tool: McpToolDefinition): McpToolDefinition {
+  if (['engineering_build_artifact', 'engineering_complete_build', 'engineering_upload_worker'].includes(tool.name)) return tool;
   if (!SCHEDULED_CONTINUATION_FENCED_TOOLS.has(tool.name)) return tool;
   const extendObjectSchema = (schema: z.ZodObject): z.ZodObject =>
     schema.safeExtend({ goalLease: goalLeaseProofSchema.optional() });
@@ -1489,6 +1574,11 @@ function readEngineeringTaskBinding(input: unknown): EngineeringTaskBinding | un
 function stripEngineeringTaskEnvelope(input: unknown): unknown {
   if (!isRecord(input) || !Object.prototype.hasOwnProperty.call(input, 'engineeringTask')) return input;
   return Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'engineeringTask'));
+}
+
+function stripWorkspaceWriterLeaseEnvelope(input: unknown): unknown {
+  if (!isRecord(input) || !Object.prototype.hasOwnProperty.call(input, 'writerLease')) return input;
+  return Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'writerLease'));
 }
 
 function stripGoalLeaseEnvelope(input: unknown): unknown {
@@ -1595,7 +1685,7 @@ async function resolveEngineeringAdmission(
     return err(appError('ENGINEERING_POLICY_CHANGED', 'The supplied Engineering task policy digest is stale. Re-prepare and reconcile the task before mutation.', true));
   }
   if (engineeringTask.goalRevision !== selected.revision || engineeringTask.userIntentRevision !== selected.userIntentRevision) {
-    return err(appError('ENGINEERING_PREFLIGHT_REQUIRED', 'The Engineering task binding is stale for the current goal revision. Re-run engineering_start_task before mutation.', true));
+    return err(appError('ENGINEERING_PREFLIGHT_REQUIRED', 'The Engineering task binding is stale for the current goal revision. Use the binding returned by the latest checkpoint, or call run_goal with the existing goal key to refresh it.', true));
   }
   if (actor.sessionId !== undefined && engineeringTask.sessionId !== actor.sessionId) {
     return err(appError('ENGINEERING_PREFLIGHT_REQUIRED', 'The Engineering task binding belongs to a different MCP session. Re-run engineering_start_task in this session before mutation.', true));
@@ -1647,6 +1737,30 @@ function engineeringMutationWithinScope(scopedPath: string | undefined, toolName
     const normalized = normalize(target);
     return normalized !== undefined && (scope === '.' || normalized === scope || normalized.startsWith(`${scope}/`));
   });
+}
+
+function startWorkspaceWriterLeaseHeartbeat(
+  service: NonNullable<McpApplicationServices['workspaceWriterLease']>,
+  workspaceId: string,
+  callId: string,
+  generation: number,
+): () => Promise<void> {
+  let closed = false;
+  let pending = false;
+  const timer = setInterval(() => {
+    if (closed || pending) return;
+    pending = true;
+    void service.heartbeat(workspaceId, callId, generation)
+      .catch(() => undefined)
+      .finally(() => { pending = false; });
+  }, 10_000);
+  timer.unref?.();
+  return async (): Promise<void> => {
+    if (closed) return;
+    closed = true;
+    clearInterval(timer);
+    await service.end(workspaceId, callId, generation);
+  };
 }
 
 function startGoalMutationFenceHeartbeat(
@@ -1742,7 +1856,7 @@ function summarizeMutationForApproval(toolName: string, input: unknown, activeWo
       lines.push(`launchCount = ${taskIds.length}`);
       if (taskIds.length > 0) lines.push(`taskIds = ${JSON.stringify(taskIds)}`);
     }
-    lines.push('WARNING: this consumes explicitly enabled Codex quota; v5.8.6 enforces read-only child sandboxes.');
+    lines.push('WARNING: this consumes explicitly enabled Codex quota; v5.9.1 enforces read-only child sandboxes.');
     return boundedApprovalSummary(lines);
   }
   const projectKind = projectCommandKind(toolName);

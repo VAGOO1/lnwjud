@@ -49,7 +49,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'write_file',
-      description: 'Create or replace a UTF-8 text file and missing parents. Balanced/Safe refuse existing targets unless overwriteExisting is explicit; Full may replace an existing target without a confirmation prompt and still creates a checkpoint. Prefer edit_file for narrow repairs. Use this instead of shell scripts that call fs.writeFile, writeFileSync, Set-Content, or equivalent when the task is simply to create or replace guarded text. Do not use write_file to persist lnwjud continuation/recovery as USER_INSTRUCTIONS, user-instruction, or generic handoff-history files; use checkpoint_goal/session_handoff for that state.',
+      description: 'Create or replace a UTF-8 text file and missing parents. Balanced/Safe refuse existing targets unless overwriteExisting is explicit; Full may replace an existing target without a confirmation prompt only when strict create-only was not requested; mode=create_new or overwriteExisting=false atomically refuses all existing destinations, regardless of profile. Prefer edit_file for narrow repairs. Use this instead of shell scripts that call fs.writeFile, writeFileSync, Set-Content, or equivalent when the task is simply to create or replace guarded text. Do not use write_file to persist lnwjud continuation/recovery as USER_INSTRUCTIONS, user-instruction, or generic handoff-history files; use checkpoint_goal/session_handoff for that state.',
       permission: 'WRITE',
       annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: writeFileSchema,
@@ -59,6 +59,7 @@ export function fileTools(context: McpToolContext): McpToolDefinition[] {
           path: input.path,
           content: input.content,
           ...(input.overwriteExisting === undefined ? {} : { overwriteExisting: input.overwriteExisting }),
+          ...(input.mode === undefined ? {} : { mode: input.mode }),
           ...(input.userConfirmed === undefined ? {} : { userConfirmed: input.userConfirmed }),
         }, signal, authorization),
     }),

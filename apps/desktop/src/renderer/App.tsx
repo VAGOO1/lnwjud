@@ -53,6 +53,7 @@ import {
 import { createTranslator } from './i18n/index.js';
 import { STARTUP_CORE_CHECK_IDS, markStartupDoctorPassed, startupDoctorCorePassed, startupDoctorNavigationTarget, startupDoctorRequired } from './features/onboarding/startup-doctor-state.js';
 import { McpDashboardState } from './mcp-dashboard-state.js';
+import { OperatorUpdateIntent, UpdateStatusEventRevision } from './operator-update-intent.js';
 
 const MAX_CLIENT_LOG_LINES = 30_000;
 
@@ -67,7 +68,11 @@ export function App(): ReactElement {
   const [error, setError] = useState<string | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
   const [mcpBusy, setMcpBusy] = useState(false);
-  const [tunnelBusy, setTunnelBusy] = useState(false);
+  const [tunnelStartPending, setTunnelStartPending] = useState(false);
+  const [tunnelStopPending, setTunnelStopPending] = useState(false);
+  const tunnelStartOperationRef = useRef<Promise<TunnelStatus> | null>(null);
+  const tunnelStopOperationRef = useRef<Promise<void> | null>(null);
+  const tunnelBusy = tunnelStartPending || tunnelStopPending;
   const [locale, setLocale] = useState<UiLocale>('th');
   const [logLines, setLogLines] = useState<readonly LogLine[]>([]);
   const [logSessions, setLogSessions] = useState<readonly LogSessionSummary[]>([]);
@@ -78,8 +83,10 @@ export function App(): ReactElement {
   const [incidentNotice, setIncidentNotice] = useState<string | null>(null);
   const [incidentBusy, setIncidentBusy] = useState(false);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const updateStatusEventRevisionRef = useRef(new UpdateStatusEventRevision());
   const [installActivity, setInstallActivity] = useState<InstallActivitySnapshot>(EMPTY_INSTALL_ACTIVITY);
   const updateInstallTransitionRef = useRef(false);
+  const operatorUpdateIntentRef = useRef(new OperatorUpdateIntent());
   const [firstRunTunnelTipOpen, setFirstRunTunnelTipOpen] = useState(false);
   const [guidedTunnelSetupOpen, setGuidedTunnelSetupOpen] = useState(false);
   const [startupDoctorReady, setStartupDoctorReady] = useState(false);
@@ -121,16 +128,19 @@ export function App(): ReactElement {
 
   useEffect(() => {
     let disposed = false;
+    const initialRevision = updateStatusEventRevisionRef.current.capture();
     void window.lnwjud.getUpdateStatus().then((status) => {
-      if (!disposed) {
+      if (!disposed && updateStatusEventRevisionRef.current.isCurrent(initialRevision)) {
         updateInstallTransitionRef.current = status.phase === 'installing';
         setUpdateStatus(status);
       }
     }).catch(() => undefined);
     const unsubscribe = window.lnwjud.onUpdateStatus((status) => {
       if (!disposed) {
+        updateStatusEventRevisionRef.current.event(status.phase);
         updateInstallTransitionRef.current = status.phase === 'installing';
         setUpdateStatus(status);
+        advanceOperatorUpdate(status);
       }
     });
     return (): void => {
@@ -428,7 +438,34 @@ export function App(): ReactElement {
     await window.lnwjud.openExternalSetupPage({ target });
   }
 
+  function advanceOperatorUpdate(status: UpdateStatus): void {
+    const action = operatorUpdateIntentRef.current.onStatus(status);
+    if (action === 'request-download') {
+      const requestRevision = updateStatusEventRevisionRef.current.capture();
+      const requestAttempt = operatorUpdateIntentRef.current.currentAttempt();
+      void window.lnwjud.checkForUpdates().then((next) => {
+        if (!updateStatusEventRevisionRef.current.isCurrent(requestRevision)) return;
+        setUpdateStatus(next);
+        advanceOperatorUpdate(next);
+      }).catch((cause: unknown) => {
+        if (!operatorUpdateIntentRef.current.isCurrentAttempt(requestAttempt)
+          || !updateStatusEventRevisionRef.current.isCurrentFailure(requestRevision)) return;
+        operatorUpdateIntentRef.current.cancel();
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    } else if (action === 'confirm-install') {
+      void window.lnwjud.installUpdate().then((result) => {
+        updateInstallTransitionRef.current = result.status.phase === 'installing';
+        setUpdateStatus(result.status);
+      }).catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      });
+    }
+  }
+
   async function handleUpdateAction(): Promise<void> {
+    let requestRevision: number | null = null;
+    let requestAttempt: number | null = null;
     try {
       if (updateStatus?.canInstall === true) {
         updateInstallTransitionRef.current = true;
@@ -437,8 +474,17 @@ export function App(): ReactElement {
         setUpdateStatus(result.status);
         return;
       }
-      setUpdateStatus(await window.lnwjud.checkForUpdates());
+      if (!operatorUpdateIntentRef.current.start()) return;
+      requestAttempt = operatorUpdateIntentRef.current.currentAttempt();
+      requestRevision = updateStatusEventRevisionRef.current.capture();
+      const status = await window.lnwjud.checkForUpdates();
+      if (!updateStatusEventRevisionRef.current.isCurrent(requestRevision)) return;
+      setUpdateStatus(status);
+      advanceOperatorUpdate(status);
     } catch (cause: unknown) {
+      if (requestAttempt !== null && (!operatorUpdateIntentRef.current.isCurrentAttempt(requestAttempt)
+        || (requestRevision !== null && !updateStatusEventRevisionRef.current.isCurrentFailure(requestRevision)))) return;
+      operatorUpdateIntentRef.current.cancel();
       updateInstallTransitionRef.current = false;
       setError(errorMessage(cause, t('app.updateCheckError')));
     }
@@ -612,15 +658,26 @@ export function App(): ReactElement {
     }
   }
 
-  async function startTunnelWithStatus(): Promise<TunnelStatus> {
-    setTunnelBusy(true);
-    try {
-      const status = await window.lnwjud.startTunnel();
-      await refresh();
-      return status;
-    } finally {
-      setTunnelBusy(false);
+  function startTunnelWithStatus(): Promise<TunnelStatus> {
+    if (tunnelStopOperationRef.current !== null) {
+      return Promise.reject(new Error('Tunnel cannot start while Stop is in progress'));
     }
+    if (tunnelStartOperationRef.current !== null) return tunnelStartOperationRef.current;
+
+    setTunnelStartPending(true);
+    const operation = Promise.resolve()
+      .then(async () => {
+        const status = await window.lnwjud.startTunnel();
+        await refresh();
+        return status;
+      })
+      .finally(() => {
+        if (tunnelStartOperationRef.current !== operation) return;
+        tunnelStartOperationRef.current = null;
+        setTunnelStartPending(false);
+      });
+    tunnelStartOperationRef.current = operation;
+    return operation;
   }
 
   async function startTunnel(): Promise<void> {
@@ -631,16 +688,26 @@ export function App(): ReactElement {
     }
   }
 
-  async function stopTunnel(): Promise<void> {
-    try {
-      setTunnelBusy(true);
-      await window.lnwjud.stopTunnel();
-      await refresh();
-    } catch (cause: unknown) {
-      setError(errorMessage(cause, t('error.tunnelStop')));
-    } finally {
-      setTunnelBusy(false);
-    }
+  function stopTunnel(): Promise<void> {
+    if (tunnelStopOperationRef.current !== null) return tunnelStopOperationRef.current;
+
+    setTunnelStopPending(true);
+    const operation = Promise.resolve()
+      .then(async () => {
+        await window.lnwjud.stopTunnel();
+        await refresh();
+      })
+      .catch((cause: unknown) => {
+        setError(errorMessage(cause, t('error.tunnelStop')));
+        throw cause;
+      })
+      .finally(() => {
+        if (tunnelStopOperationRef.current !== operation) return;
+        tunnelStopOperationRef.current = null;
+        setTunnelStopPending(false);
+      });
+    tunnelStopOperationRef.current = operation;
+    return operation;
   }
 
   async function beginTunnelOAuthLogin(): Promise<TunnelOAuthLoginStatus> {
@@ -962,6 +1029,8 @@ export function App(): ReactElement {
           locale={locale}
           mcpBusy={mcpBusy}
           tunnelBusy={tunnelBusy}
+          tunnelStartPending={tunnelStartPending}
+          tunnelStopPending={tunnelStopPending}
           onRefresh={refresh}
           onStopMcp={stopMcp}
           onRestartMcp={restartMcp}
@@ -1041,6 +1110,7 @@ export function App(): ReactElement {
         <SettingsPage
           locale={locale}
           dashboard={dashboard}
+          updatesUnavailable={updateStatus?.phase === 'unavailable'}
           onLocaleChange={changeLocale}
           onFactoryReset={factoryReset}
           onPermissionProfileChange={setPermissionProfile}
@@ -1065,6 +1135,8 @@ export function App(): ReactElement {
           onStartTunnel={startTunnelWithStatus}
           onStopTunnel={stopTunnel}
           tunnelBusy={tunnelBusy}
+          tunnelStartPending={tunnelStartPending}
+          tunnelStopPending={tunnelStopPending}
           onBeginTunnelOAuthLogin={beginTunnelOAuthLogin}
           onGetTunnelOAuthLoginStatus={getTunnelOAuthLoginStatus}
           onCancelTunnelOAuthLogin={cancelTunnelOAuthLogin}

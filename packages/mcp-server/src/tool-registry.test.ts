@@ -5,12 +5,12 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { appError, err, ok } from '@lnwjud/domain';
-import { LocalCapabilityService, ShellCapabilityBackend } from '@lnwjud/capabilities';
+import { LocalCapabilityService, ShellCapabilityBackend, SqliteWorkspaceWriterLease } from '@lnwjud/capabilities';
 import { permissionProfiles, type PermissionProfile } from '@lnwjud/permissions';
 import { DEFAULT_DESTRUCTIVE_AUTO_APPROVAL_POLICY, type DestructiveAutoApprovalPolicy, type ToolAvailabilitySnapshot } from '@lnwjud/shared';
 import { ActivityTracker, type ActivitySinkEvent } from './activity-tracker.js';
 import { CODEX_DELEGATION_TOOL_NAMES, isCodexDelegationTool, ToolRegistry, type McpApplicationServices, type ToolRegistryOptions, type WorkspaceScope } from './tool-registry.js';
-import { GoalRequestCancellationService } from '@lnwjud/application';
+import { GoalRequestCancellationService, RepositoryImportService } from '@lnwjud/application';
 import { CODEX_TOOL_NAMES } from './tools/codex-tools.js';
 import { AUTOMATION_TOOL_NAMES } from './tools/automation-tools.js';
 import { isAdvertisedDeliveryState } from './tool-delivery-contract.js';
@@ -24,6 +24,268 @@ afterEach(() => {
 });
 
 describe('MCP tool registry', () => {
+  it('prevents lease takeover while a previously unleased MCP mutation remains in flight', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-mcp-unleased-race-'));
+    try {
+      const lease = new SqliteWorkspaceWriterLease(path.join(root, 'leases.sqlite'));
+      let entered!: () => void;
+      let finish!: () => void;
+      const started = new Promise<void>((resolve) => { entered = resolve; });
+      const gate = new Promise<void>((resolve) => { finish = resolve; });
+      const registry = new ToolRegistry({
+        workspaceWriterLease: lease,
+        file: { async editFile(): Promise<ReturnType<typeof ok>> {
+          entered();
+          await gate;
+          return ok({ path: 'file.ts', replacements: 1, bytesWritten: 1 });
+        } } as never,
+      }, actor, {
+        sessionId: 'first-session', profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+        authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      });
+      const mutation = registry.invoke('edit_file', {
+        workspaceId: 'workspace-a', path: 'file.ts', oldText: 'a', newText: 'b',
+      });
+      const dispatch = await Promise.race([
+        started.then(() => ({ entered: true as const })),
+        mutation.then((response) => ({ entered: false as const, response })),
+      ]);
+      expect(dispatch).toEqual({ entered: true });
+      expect(await lease.acquire('workspace-a', 'other-client', 'other-session', 120))
+        .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      finish();
+      expect((await mutation).isError).not.toBe(true);
+      expect(await lease.acquire('workspace-a', 'other-client', 'other-session', 120))
+        .toMatchObject({ ok: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+  it('routes a strict five-field safe import through the authorized dedicated use-case, not generic Git', async () => {
+    const runtimeCalls: unknown[] = [];
+    const repositoryImport = new RepositoryImportService({
+      async get(): Promise<{ realRootPath: string }> { return { realRootPath: 'C:\\\\verified-project' }; },
+    } as never, {
+      async start(input): Promise<ReturnType<typeof ok>> {
+        runtimeCalls.push(input);
+        return ok({ taskId: 'git-import-123', state: 'running' });
+      },
+      async status(): Promise<ReturnType<typeof ok>> { return ok({ state: 'running' }); },
+      async cancel(): Promise<ReturnType<typeof ok>> { return ok({ state: 'cancelled' }); },
+    });
+    const registry = new ToolRegistry({ repositoryImport }, actor, {
+      sessionId: 'git-import-session',
+      profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+    });
+    const input = {
+      workspaceId: 'workspace-a',
+      requestId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      url: 'https://github.com/octocat/Hello-World',
+      destination: 'imported-project',
+      commit: '7fd1a60b01f91b314f59955a4e4d4e80d8edf11d',
+    };
+    const response = await registry.invoke('git_clone_safe', input);
+    expect(response.isError).not.toBe(true);
+    expect(runtimeCalls).toHaveLength(1);
+    expect(runtimeCalls[0]).toMatchObject({
+      request: input,
+      owner: { clientId: actor.clientId, sessionId: 'git-import-session', workspaceId: input.workspaceId },
+    });
+    expect((await registry.invoke('git_clone_safe', { ...input, arbitraryGitArgs: ['--force'] })).isError).toBe(true);
+    expect((await registry.invoke('git_clone_safe', { ...input, url: 'https://user:secret@github.com/repo.git' })).isError).toBe(true);
+    expect(runtimeCalls).toHaveLength(1);
+  });
+
+  it('enforces durable workspace writer lease across registry clients including Full Bypass', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-mcp-writer-fence-'));
+    try {
+      const lease = new SqliteWorkspaceWriterLease(path.join(root, 'leases.sqlite'));
+      const edits: string[] = [];
+      const file = { async editFile(actor: { clientId: string }): Promise<ReturnType<typeof ok>> {
+        edits.push(actor.clientId);
+        return ok({ path: 'file.ts', replacements: 1, bytesWritten: 1 });
+      } } as never;
+      const opts = (sessionId: string): ToolRegistryOptions => ({
+        sessionId,
+        profileProvider: () => permissionProfiles.full,
+        authorizationModeProvider: () => 'full_bypass',
+      });
+      const first = new ToolRegistry({ file, workspaceWriterLease: lease }, actor, opts('session-a'));
+      const other = new ToolRegistry({ file, workspaceWriterLease: lease }, { clientId: 'client-other', clientName: 'other' }, opts('session-b'));
+      const acquired = await lease.acquire('workspace-a', actor.clientId, 'session-a', 120);
+      expect(acquired.ok).toBe(true);
+      if (!acquired.ok) return;
+      const request = { workspaceId: 'workspace-a', path: 'file.ts', oldText: 'a', newText: 'b' };
+      expect(await other.invoke('edit_file', request)).toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+      expect(await first.invoke('edit_file', request)).toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+      expect(edits).toEqual([]);
+      const allowed = await first.invoke('edit_file', { ...request, writerLease: acquired.value });
+      if (allowed.isError) throw new Error(JSON.stringify(allowed));
+      expect(edits).toEqual([actor.clientId]);
+      expect(await lease.release('workspace-a', actor.clientId, 'session-a', acquired.value)).toMatchObject({ ok: true });
+      expect((await other.invoke('edit_file', request)).isError).not.toBe(true);
+      expect(edits).toEqual([actor.clientId, 'client-other']);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it('requires explicit confirmation when the same client recovers an idle older MCP session', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-mcp-recover-fence-'));
+    try {
+      let time = 100_000;
+      const lease = new SqliteWorkspaceWriterLease(path.join(root, 'leases.sqlite'), () => time);
+      const first = await lease.acquire('workspace-a', actor.clientId, 'old-session', 600);
+      if (!first.ok) throw new Error('lease setup failed');
+      const registry = new ToolRegistry({ workspaceWriterLease: lease }, actor, {
+        sessionId: 'new-session',
+        profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+        authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      });
+      time += 61_000;
+      const input = { workspaceId: 'workspace-a', ttlSeconds: 600, recoverAbandoned: true };
+      expect(await registry.invoke('workspace_writer_lease_acquire', input))
+        .toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+      expect((await registry.invoke('workspace_writer_lease_acquire', { ...input, userConfirmed: true })).isError).not.toBe(true);
+      expect(await lease.inspect('workspace-a')).toMatchObject({ ok: true, value: { generation: 2, state: 'active' } });
+      expect(await lease.begin('workspace-a', actor.clientId, 'old-session', 'stale', first.value))
+        .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('does not block goal lifecycle tools (claim_scheduled_continuation, run_goal) behind workspace writer lease', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-mcp-goal-tools-unblocked-'));
+    try {
+      const lease = new SqliteWorkspaceWriterLease(path.join(root, 'leases.sqlite'));
+      // Pre-acquire an active writer lease with a different session ID
+      const priorLease = await lease.acquire('workspace-a', actor.clientId, 'dead-worker-session', 600);
+      expect(priorLease.ok).toBe(true);
+
+      const claimCalled = vi.fn(async () => ok({
+        outcome: 'recurring_acquired' as const,
+        continuation: { continuationId: 'cont-1', goalId: 'goal-1', status: 'scheduled' } as never,
+        goal: { goalId: 'goal-1', status: 'active', revision: 1 } as never,
+        leaseToken: 'token-123',
+        leaseGeneration: 1,
+        acquisition: 'normal' as const,
+        runKey: 'run-key-1',
+        nextRequiredAction: 'continue_work_with_existing_recurring_watchdog' as const,
+        currentWakeMayReturn: false as const,
+      }));
+      const runGoalCalled = vi.fn(async () => ok({
+        goalId: 'goal-1',
+        goalKey: 'gk-1',
+        revision: 1,
+        status: 'active' as const,
+        acquired: true,
+        leaseToken: 'lease-token-1',
+        leaseGeneration: 1,
+        leaseExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+        plan: { steps: [] },
+      }));
+
+      const registry = new ToolRegistry({
+        workspaceWriterLease: lease,
+        scheduledContinuations: {
+          claimScheduledContinuation: claimCalled,
+          getScheduledContinuation: async () => null,
+        } as never,
+        goals: { runGoal: runGoalCalled } as never,
+        file: {
+          readFile: async () => err(appError('FILE_NOT_FOUND', 'not found')),
+          editFile: async () => ok({ path: 'file.ts', replacements: 1, bytesWritten: 1 }),
+        } as never,
+      }, actor, {
+        sessionId: 'new-chat-wake-session',
+        profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+        authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+      });
+
+      // 1. claim_scheduled_continuation must succeed and reach service, NOT be rejected by writer lease
+      const claimResult = await registry.invoke('claim_scheduled_continuation', {
+        continuationId: 'cont-1',
+        workspaceId: 'workspace-a',
+        goalId: 'goal-1',
+      });
+      expect(claimResult.isError).not.toBe(true);
+      expect(claimCalled).toHaveBeenCalledTimes(1);
+
+      // 2. run_goal must succeed and reach service, NOT be rejected by writer lease
+      const runResult = await registry.invoke('run_goal', {
+        workspaceId: 'workspace-a',
+        goalKey: 'gk-1',
+        objective: 'Test unblocked run_goal',
+      });
+      expect(runResult.isError).not.toBe(true);
+      expect(runGoalCalled).toHaveBeenCalledTimes(1);
+
+      // 3. BUT actual workspace mutation (edit_file) WITHOUT writer lease proof is still blocked by writer lease!
+      const editResult = await registry.invoke('edit_file', {
+        workspaceId: 'workspace-a',
+        path: 'file.ts',
+        oldText: 'a',
+        newText: 'b',
+      });
+      expect(editResult.isError).toBe(true);
+      expect(editResult).toMatchObject({
+        structuredContent: { error: { code: 'CONFLICT' } },
+      });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it('fences workspace indexing mutations as well as file writes across independent clients', async () => {
+    const root = await mkdtemp(path.join(tmpdir(), 'lnwjud-writer-lease-index-'));
+    try {
+      const lease = new SqliteWorkspaceWriterLease(path.join(root, 'leases.sqlite'));
+      const indexed = vi.fn(async (): Promise<ReturnType<typeof ok>> => ok({ status: 'ready' }));
+      const services: McpApplicationServices = {
+        workspaceWriterLease: lease,
+        workspaceIndex: { indexWorkspace: indexed } as never,
+      };
+      const options = (sessionId: string): ToolRegistryOptions => ({
+        sessionId,
+        authorizationModeProvider: (): 'full_bypass' => 'full_bypass',
+        profileProvider: (): typeof permissionProfiles.full => permissionProfiles.full,
+      });
+      const owner = new ToolRegistry(services, actor, options('owner-session'));
+      const another = new ToolRegistry(services, { clientId: 'another-client', clientName: 'another' }, options('another-session'));
+      const acquired = await lease.acquire('workspace-a', actor.clientId, 'owner-session', 120);
+      expect(acquired.ok).toBe(true);
+      if (!acquired.ok) return;
+      const target = { workspaceId: 'workspace-a' };
+      expect(await another.invoke('workspace_index', target))
+        .toMatchObject({ isError: true, structuredContent: { error: { code: 'CONFLICT' } } });
+      expect(indexed).not.toHaveBeenCalled();
+      expect((await owner.invoke('workspace_index', { ...target, writerLease: acquired.value })).isError).not.toBe(true);
+      expect(indexed).toHaveBeenCalledTimes(1);
+      expect(await lease.release('workspace-a', actor.clientId, 'owner-session', acquired.value)).toMatchObject({ ok: true });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it('omits every unvalidated import input from direct and nested batch audit persistence', async () => {
+    const persisted: unknown[] = [];
+    const tracker = new ActivityTracker(undefined, undefined, {
+      async record(event, detail): Promise<void> { persisted.push({ event, detail }); },
+    });
+    const registry = new ToolRegistry({}, actor, { activityTracker: tracker });
+    const marker = ['unvalidated', 'sentinel'].join('-');
+    for (const prefix of ['https://', 'https:/', 'https:', 'not a URL ']) {
+      const input = { operation: 'start', url: prefix + marker + '@example.invalid/repo.git', [marker]: marker };
+      await registry.invoke('git_clone_safe', input);
+      await registry.invoke('tool_batch', { calls: [{ tool: 'git_clone_safe', arguments: input }] });
+    }
+    const serialized = JSON.stringify(persisted);
+    expect(serialized.includes(marker)).toBe(false);
+    expect(serialized.includes('git_clone_safe')).toBe(true);
+  });
+
   it('attaches Goal audit attribution only after verifying a current lease and never executes with a stale proof', async () => {
     const captured: ActivitySinkEvent[] = [];
     const tracker = new ActivityTracker(undefined, undefined, { async record(event): Promise<void> { captured.push(event); } });
@@ -141,8 +403,8 @@ describe('MCP tool registry', () => {
   it('returns the exact deterministic tool order', () => {
     const registry = new ToolRegistry({}, actor);
     expect(registry.list().map((tool) => tool.name)).toEqual([
-      'workspace_list', 'workspace_register', 'workspace_info', 'workspace_tree', 'project_snapshot', 'engineering_prepare_task', 'engineering_start_task', 'engineering_get_status', 'read_file', 'read_files',
-      'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git', 'write_file',
+      'workspace_list', 'workspace_path_preflight', 'workspace_writer_lease_acquire', 'workspace_writer_lease_status', 'workspace_writer_lease_renew', 'workspace_writer_lease_release', 'workspace_register', 'workspace_info', 'workspace_tree', 'project_snapshot', 'engineering_prepare_task', 'engineering_start_task', 'engineering_get_status', 'engineering_build_artifact', 'engineering_complete_build', 'engineering_upload_worker', 'read_file', 'read_files',
+      'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git_clone_safe', 'git_clone_status', 'git_clone_cancel', 'git', 'write_file',
       'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'list_recovery_items', 'restore_deleted_file', 'list_checkpoints', 'restore_checkpoint', 'process_start', 'process_list', 'process_status',
       'process_logs', 'process_stop', 'project_dev', 'project_test', 'project_lint',
       'project_typecheck', 'project_build', 'shell', 'dom_cdp', 'computer_use', 'accessibility', 'input_event', 'vision', 'vision_annotated_capture', 'ui_target_action', 'window', 'health',
@@ -155,7 +417,7 @@ describe('MCP tool registry', () => {
       'read_file_page', 'read_file_page_continue',
       'workspace_index', 'workspace_index_status', 'workspace_index_watch', 'workspace_index_stop',
       'session_handoff', 'verify_incremental',
-      'run_goal', 'get_goal', 'get_goal_plan', 'update_goal_plan', 'update_goal_acceptance', 'revise_goal_intent',
+      'recover_blocked_goal', 'run_goal', 'get_goal', 'get_goal_plan', 'update_goal_plan', 'update_goal_acceptance', 'revise_goal_intent',
       'create_context_capsule', 'get_context_capsule', 'list_context_capsules', 'context_pressure', 'record_delivery_receipt', 'list_delivery_receipts', 'advance_goal_iteration',
       'checkpoint_goal', 'checkpoint_goal_engineering', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals',
       'resource_snapshot', 'call_history', 'goal_result', 'workflow_templates', 'workflow_prepare', 'workflow_start',
@@ -651,7 +913,7 @@ describe('MCP tool registry', () => {
     const response = await registry.invoke('tool_batch', { calls: [
       { id: 'disabled-read', tool: 'read_file', arguments: { workspaceId: 'workspace-1', path: 'file.txt' } },
     ] });
-    expect(response.isError).not.toBe(true);
+    expect(response.isError).toBe(true);
     expect(response.structuredContent).toMatchObject({ summary: { total: 1, succeeded: 0, failed: 1 }, results: [
       { id: 'disabled-read', status: 'failed' },
     ] });
@@ -1107,6 +1369,33 @@ describe('MCP tool registry', () => {
     expect(executed).toBe(1);
   });
 
+  it('keeps direct external MCP and batched child results semantically identical with explicit host approval', async () => {
+    const calls: string[] = [];
+    const registry = new ToolRegistry({
+      extensions: {
+        async callMcpTool(input): Promise<ReturnType<typeof ok>> {
+          calls.push(input.tool);
+          return ok({ childTool: input.tool, echoed: true });
+        },
+      } as McpApplicationServices['extensions'],
+    }, actor, {
+      profileProvider: (): PermissionProfile => permissionProfiles.full,
+      hostMutationApprovalProvider: approveMutation,
+    });
+    const args = { server: 'mock-context', tool: 'read_context', arguments: { query: 'safe' }, userConfirmed: true };
+    const direct = await registry.invoke('mcp_call', args);
+    expect(direct.isError).not.toBe(true);
+    const batched = await registry.invoke('tool_batch', {
+      calls: [{ id: 'same-read', tool: 'mcp_call', arguments: args }],
+    });
+    expect(batched.isError).not.toBe(true);
+    expect(batched.structuredContent).toMatchObject({
+      summary: { total: 1, succeeded: 1, failed: 0 },
+      results: [{ id: 'same-read', tool: 'mcp_call', status: 'succeeded' }],
+    });
+    expect(calls).toEqual(['read_context', 'read_context']);
+  });
+
   it('requires explicit confirmation for every remote mutation, child MCP calls, and opaque shell commands', async () => {
     const calls: string[] = [];
     const registry = new ToolRegistry({
@@ -1118,6 +1407,7 @@ describe('MCP tool registry', () => {
     await expect(registry.invoke('web_fetch', { url: 'https://example.com/item/1', method: 'PUT' })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_REQUIRED' } } });
     expect((await registry.invoke('shell', { operation: 'run', executable: 'npm.cmd', arguments: ['run', 'cleanup'] })).isError).not.toBe(true);
     await expect(registry.invoke('mcp_call', { server: 'child', tool: 'delete_file', arguments: { path: 'x' } })).resolves.toMatchObject({ isError: true, structuredContent: { error: { code: 'PERMISSION_REQUIRED' } } });
+    expect(JSON.stringify(await registry.invoke('mcp_call', { server: 'child', tool: 'read_context' }))).toContain('userConfirmed: true');
     expect(calls).toEqual(['shell']);
     expect((await registry.invoke('web_fetch', { url: 'https://example.com/item/1', method: 'DELETE', userConfirmed: true })).isError).not.toBe(true);
     expect((await registry.invoke('shell', { operation: 'run', executable: 'npm.cmd', arguments: ['run', 'cleanup'], userConfirmed: true })).isError).not.toBe(true);

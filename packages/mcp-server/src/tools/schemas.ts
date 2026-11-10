@@ -53,6 +53,17 @@ export const readFilePageContinueSchema = z.object({
 export const readFilesSchema = z.object({ workspaceId: optionalWorkspaceIdSchema, files: z.array(readFileSchema.omit({ workspaceId: true })).min(1).max(20) }).strict();
 export const searchFilesSchema = z.object({ workspaceId: optionalWorkspaceIdSchema, path: pathSchema.optional(), glob: z.string().max(1024).optional(), maxResults: z.number().int().min(1).max(MAX_SEARCH_RESULTS).optional(), includeIgnored: z.boolean().default(false) }).strict();
 export const searchTextSchema = searchFilesSchema.extend({ query: z.string().min(1).max(32_768), regex: z.boolean().default(false) }).strict();
+export const gitCloneSafeSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  requestId: z.string().min(1).max(128),
+  url: z.string().min(1).max(2048),
+  destination: pathSchema,
+  commit: z.string().regex(/^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$/),
+}).strict();
+export const gitCloneHandleSchema = z.object({
+  workspaceId: workspaceIdSchema,
+  taskId: z.string().min(1).max(128),
+}).strict();
 export const gitStatusSchema = workspaceInfoSchema;
 export const gitDiffSchema = z.object({ workspaceId: workspaceIdSchema, path: pathSchema.optional(), staged: z.boolean().optional(), maxBytes: z.number().int().min(1).max(4 * 1024 * 1024).optional() }).strict();
 export const gitLogSchema = z.object({ workspaceId: workspaceIdSchema, maxCommits: z.number().int().min(1).max(100).optional(), maxBytes: z.number().int().min(1).max(4 * 1024 * 1024).optional() }).strict();
@@ -68,6 +79,7 @@ export const writeFileSchema = z.object({
   path: pathSchema,
   content: z.string().refine((value) => Buffer.byteLength(value, 'utf8') <= MAX_MULTI_FILE_BYTES, 'File is too large'),
   overwriteExisting: z.boolean().optional(),
+  mode: z.literal('create_new').optional(),
   userConfirmed: z.boolean().optional(),
 }).strict();
 export const applyPatchSchema = z.object({ workspaceId: optionalWorkspaceIdSchema, files: z.array(z.object({ path: pathSchema, content: z.string().refine((value) => Buffer.byteLength(value, 'utf8') <= MAX_MULTI_FILE_BYTES, 'File is too large') }).strict()).min(1).max(20), userConfirmed: z.boolean().optional() }).strict();
@@ -109,6 +121,15 @@ export const restoreCheckpointSchema = z.object({
 }).strict();
 
 export const workspaceListSchema = z.object({}).strict();
+export const workspaceWriterLeaseProofSchema = z.object({
+  leaseId: z.string().uuid(),
+  leaseToken: z.string().min(1).max(256),
+  generation: z.number().int().nonnegative(),
+});
+export const workspaceWriterLeaseAcquireSchema = z.object({ workspaceId: workspaceIdSchema, ttlSeconds: z.number().int().min(30).max(3600).optional(), recoverAbandoned: z.boolean().optional(), userConfirmed: z.boolean().optional() }).strict();
+export const workspaceWriterLeaseStatusSchema = z.object({ workspaceId: workspaceIdSchema }).strict();
+export const workspaceWriterLeaseProofActionSchema = z.object({ workspaceId: workspaceIdSchema, writerLease: workspaceWriterLeaseProofSchema, ttlSeconds: z.number().int().min(30).max(3600).optional() }).strict();
+export const workspacePathPreflightSchema = z.object({ path: pathSchema, userConfirmed: z.boolean().optional() }).strict();
 export const workspaceRegisterSchema = z.object({
   parentWorkspaceId: optionalWorkspaceIdSchema,
   path: pathSchema,

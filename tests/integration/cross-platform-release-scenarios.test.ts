@@ -180,7 +180,7 @@ const nativeCiScenarios: readonly Scenario[] = [
   ['096 native platform contract runs the release-scenario suite', () => expectWorkflowContains('tests/integration/cross-platform-release-scenarios.test.ts')],
   ['097 native contract keeps non-desktop packages and shards the desktop suite', async () => {
     const workflow = await workflowSource();
-    expect(workflow).toContain("run: pnpm -r --filter '!@lnwjud/desktop' --if-present test");
+    expect(workflow).toContain("run: pnpm -r --workspace-concurrency=2 --filter '!@lnwjud/desktop' --if-present test");
     expect(workflow).toContain('desktop-test-shards:');
     expect(workflow).toContain('--shard=${{ matrix.shard_index }}/${{ matrix.shard_total }}');
     expect(workflow).toContain("--filter '@lnwjud/cli...' build");

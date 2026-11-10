@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:net';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { open, readFile } from 'node:fs/promises';
@@ -17,6 +17,7 @@ import {
   FileService,
   EngineeringPreparationService,
   GitService,
+  RepositoryImportService,
   GoalContinuationService,
   WorkflowTemplateService,
   WorkflowStartService,
@@ -39,6 +40,7 @@ import {
   type FileActor,
   type DoctorProbeResult,
 } from '@lnwjud/application';
+import { createHostWindowsNativeAuthority, createHostPosixProcessRuntime, SharedManagedWriterAdmission, SqliteWorkspaceWriterLease, SecureRepositoryImportRuntime } from '@lnwjud/capabilities';
 import { AuditService, decodeActivityTargetReference, type ActivityAuditEvent, type ActivityTargetDetail, type AuditEventRepository, type AuditEventSummaryProjection } from '@lnwjud/audit';
 import { CodexDiscovery, formatCodexDiscoveryError } from '@lnwjud/codex';
 import type { GoalRecord, Result } from '@lnwjud/domain';
@@ -56,8 +58,13 @@ import {
   OfficeDataWorkflowService,
   LNWJUD_MCP_IDENTITY_PATH,
   RuntimeEngineeringEvidenceVerifier,
+  EngineeringBuildCaptureService,
+  LocalEngineeringObservationProvider,
+  CloudflareEngineeringObservationProvider,
+  createEngineeringReceiptArtifactVerifier,
   createEngineeringArtifactVerifier,
   createEngineeringSourceStateProvider,
+  createEngineeringGithubJobsProvider,
   RuntimeGoalManagedTaskStateReader,
   createFileActivitySink,
   mcpActivityLogPath,
@@ -273,15 +280,18 @@ export interface DesktopRuntime {
   getActiveWorkspaceScope(): Promise<WorkspaceScope | null>;
   getActiveWorkspaceScopes(): Promise<readonly WorkspaceScope[]>;
   createBackup(reason?: BackupReason): Promise<BackupSummary>;
+  pauseTunnelForUpdate(): Promise<TunnelStatus>;
   ensureDefaultWorkspace(rootPath: string): Promise<string>;
   autoStartMcp(): Promise<McpConnectionStatus>;
   autoStartWatcher(): Promise<string | null>;
   autoStartTunnel(): Promise<TunnelStatus | null>;
   autoStartRemoteMcp(): Promise<RemoteMcpStatus>;
+  prepareFactoryReset(): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface DesktopRuntimeOptions {
+  readonly nativeContainmentDirectory?: string;
   readonly permissionProfile?: PermissionProfileName;
   readonly hostMutationApprovalProvider?: (request: HostMutationApprovalRequest) => boolean | Promise<boolean>;
   readonly pdfProviderInstaller?: (dataPath: string) => Promise<InstalledPdfProvider>;
@@ -498,7 +508,9 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     console.error(`Automatic database backup failed: ${error instanceof Error ? error.message : 'unknown error'}`);
   });
   const workspaceService = new WorkspaceService(workspaceRepository);
-  const gitService = new GitService(workspaceRepository);
+  const nativeAuthority = createHostWindowsNativeAuthority(dataPath, options.nativeContainmentDirectory);
+  const writerAdmission = new SharedManagedWriterAdmission(path.join(dataPath, 'background-tasks'), nativeAuthority);
+  const gitService = new GitService(workspaceRepository, undefined, undefined, { writerAdmission, nativeContainmentRoot: path.join(dataPath, 'native-managed-git'), ...(nativeAuthority === undefined ? {} : { nativeAuthority }) });
   const codexDiscovery = new CodexDiscovery();
   const executableResolver = new PathExecutableResolver();
   const storedProfile = settingsRepository.get(permissionSettingKey);
@@ -520,7 +532,11 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     globalSettingsProvider: (): EngineeringHarnessSettings => parseEngineeringHarnessSettings(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessSettings)).settings,
     workspaceOverrideProvider: (workspaceId): EngineeringHarnessWorkspaceOverride | undefined => parseEngineeringHarnessWorkspaceOverrides(settingsRepository.get(USER_SETTING_KEYS.engineeringHarnessWorkspaceOverrides))[workspaceId],
   });
+  const workspaceWriterLease = new SqliteWorkspaceWriterLease(path.join(dataPath, 'workspace-writer-leases.sqlite'), Date.now, writerAdmission);
   const processService = new ProcessService(workspaceRepository, {
+    writerAdmission,
+    ...(nativeAuthority === undefined ? {} : { nativeAuthority }),
+    nativeContainmentRoot: path.join(dataPath, 'native-managed-processes'),
     projectService,
     profileProvider: activePermissionProfile,
     defaultTimeoutMsProvider: (): number => readSettings().processTimeoutMs,
@@ -534,6 +550,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   const recoveryTrashRoot = path.join(dataPath, 'recovery-trash');
   const pathGuard = new WorkspacePathGuard(new SecretPolicy(), { unrestricted, trustedWorkspaceAccess: true });
   const fileService = new FileService(workspaceRepository, pathGuard, undefined, {
+    writerAdmission,
     checkpointService,
     profileProvider: activePermissionProfile,
     unrestricted,
@@ -617,6 +634,9 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     processService,
   });
   const codexService = new CodexService(workspaceRepository, {
+    writerAdmission,
+    nativeContainmentRoot: path.join(dataPath, 'native-managed-codex'),
+    ...(nativeAuthority === undefined ? {} : { nativeAuthority }),
     auditService,
     profileProvider: activePermissionProfile,
   });
@@ -625,7 +645,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     (await workspaceRepository.list())
       .filter((workspace) => !isMachineRootPath(workspace.realRootPath) && !isMachineRootPath(workspace.rootPath))
       .map((workspace) => workspace.realRootPath)
-  ), unrestricted, () => readSettings().capabilityRoots, () => readSettings().shellSynchronousWaitSeconds, options.nativeCapabilityApi);
+  ), unrestricted, () => readSettings().capabilityRoots, () => readSettings().shellSynchronousWaitSeconds, options.nativeCapabilityApi, nativeAuthority, createHostPosixProcessRuntime(options.nativeContainmentDirectory));
   const taskCancellation = new GoalTaskCancellationService([
     { provider: 'process', cancelForGoal: processService.cancelForGoal.bind(processService) },
     { provider: 'codex', cancelForGoal: codexService.cancelForGoal.bind(codexService) },
@@ -641,17 +661,40 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   });
   const engineeringSourceState = createEngineeringSourceStateProvider(async (workspaceId, args) => gitService.run(actor, { workspaceId, args }));
   const engineeringArtifactVerifier = createEngineeringArtifactVerifier(async (workspaceId) => (await workspaceRepository.get(workspaceId))?.realRootPath);
+  const engineeringWorkspaceRoot = async (workspaceId: string): Promise<string | undefined> => (await workspaceRepository.get(workspaceId))?.realRootPath;
+  const engineeringGithubJobs = createEngineeringGithubJobsProvider(engineeringWorkspaceRoot);
+  const engineeringReceipt = (workspaceId: string, observationId: string): ReturnType<EngineeringBuildCaptureService['resolveReceipt']> => engineeringCapture.resolveReceipt(workspaceId, observationId);
+  const verifyEngineeringArtifact = createEngineeringReceiptArtifactVerifier(engineeringWorkspaceRoot);
+  const cloudflareToken = (): string | undefined => process.env.CLOUDFLARE_API_TOKEN;
   const goalService = new GoalContinuationService(workspaceRepository, goalRepository, {
+    engineeringPreparation: engineeringPreparationService,
     engineeringEvidenceVerifier: new RuntimeEngineeringEvidenceVerifier({
       process: processService,
       shell: capabilityRuntime.shell,
       sourceState: engineeringSourceState,
       artifactVerifier: engineeringArtifactVerifier,
+      workspaceRoot: engineeringWorkspaceRoot,
+      githubJobs: engineeringGithubJobs,
+      deliveryObservations: [
+        new LocalEngineeringObservationProvider(engineeringReceipt, verifyEngineeringArtifact),
+        new CloudflareEngineeringObservationProvider({ receipt: engineeringReceipt, token: cloudflareToken, verifyArtifact: verifyEngineeringArtifact }),
+      ],
     }),
     scheduledContinuations: goalRepository,
     workerLiveness: goalMutationFence,
     taskCancellation,
     requestCancellation,
+  });
+  const engineeringCapture = new EngineeringBuildCaptureService({
+    goals: goalService,
+    receipts: goalRepository,
+    process: processService,
+    workspaceRoot: engineeringWorkspaceRoot,
+    signingKey: (): Buffer => {
+      if (checkpointEncryptionKey === undefined) throw new Error('Engineering build proof requires secure persistent host key storage');
+      return createHmac('sha256', checkpointEncryptionKey).update('lnwjud-engineering-build-receipts-v1').digest();
+    },
+    cloudflareToken,
   });
   async function buildEngineeringHarnessStatus(selectedWorkspace: Workspace | null): Promise<DashboardEngineeringHarnessStatus> {
     const settings = readSettings();
@@ -723,6 +766,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   const scheduledContinuationService = new ScheduledContinuationService(goalRepository, {
     workerLiveness: goalMutationFence,
     automationResumes: automationRepository,
+    workspaceWriterFence: workspaceWriterLease,
   });
   const extensionsService: ExtensionsService = createLocalExtensionsService({
     settingsJson: settingsRepository.get(EXTENSIONS_SETTINGS_KEY),
@@ -736,6 +780,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
   });
   const debugSessions = new DapSessionService();
   const mcpServices: McpApplicationServices = {
+    engineeringCapture,
     platform: process.platform,
     runtimeStatePath: path.join(dataPath, 'upgrade-runtime.json'),
     ...(options.eccRuntimeOptions === undefined ? {} : { eccRuntimeOptions: options.eccRuntimeOptions }),
@@ -752,6 +797,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     debugSessions,
     extensions: extensionsService,
     workspaceInfo: workspaceInfoService,
+    workspaceWriterLease,
     workspaceQuery: workspaceQueryService,
     projectSnapshot: projectSnapshotService,
     project: projectService,
@@ -771,6 +817,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     search: searchService,
     workspaceIndex,
     git: gitService,
+    repositoryImport: new RepositoryImportService(workspaceRepository, new SecureRepositoryImportRuntime(dataPath, nativeAuthority)),
     process: processService,
     codex: codexService,
     agentSwarm: agentSwarmService,
@@ -1062,6 +1109,10 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     },
   );
   const tunnelController = new TunnelController({
+    ...(nativeAuthority === undefined ? {} : {
+      clearStaleTunnelAlias: (request): Promise<void> => nativeAuthority.clearStaleTunnelAlias(request),
+      stopOwnedTunnel: (request): Promise<void> => nativeAuthority.stopOwnedTunnel(request),
+    }),
     getClientPath: (): string | null => settingsRepository.get(CLIENT_PATH_SETTING),
     getBundledClientPath: bundledTunnelClientPath,
     setClientPath: (value: string): void => { settingsRepository.set(CLIENT_PATH_SETTING, value); },
@@ -1853,6 +1904,11 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
       recordPersistentTunnelStatus(status);
       return status;
     },
+    stopTunnelFromUser: async (): Promise<TunnelStatus> => {
+      const status = await tunnelController.stopFromUser();
+      recordPersistentTunnelStatus(status);
+      return status;
+    },
     getTunnelStatus: (): Promise<TunnelStatus> => observedTunnelStatus(),
     beginTunnelOAuthLogin: (): Promise<TunnelOAuthLoginStatus> => oauthLoginManager.begin(),
     getTunnelOAuthLoginStatus: async (): Promise<TunnelOAuthLoginStatus> => oauthLoginManager.status(),
@@ -2268,6 +2324,7 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
     activityTracker,
     logHub,
     toolAvailabilityService,
+    prepareFactoryReset: (): Promise<void> => tunnelController.prepareFactoryReset(),
     getLocale: (): UiLocale => readLocale(settingsRepository),
     getUserSettings: (): UserSettings => readSettings(),
     getDestructivePolicy: (): DestructiveAutoApprovalPolicy => destructivePolicyProvider(),
@@ -2279,6 +2336,11 @@ export function createDesktopRuntime(dataPath: string, options: DesktopRuntimeOp
       (await resolveActiveProjectWorkspaces()).map((workspace) => ({ workspaceId: workspace.id, rootPath: workspace.realRootPath }))
     ),
     createBackup: (reason: BackupReason = 'manual'): Promise<BackupSummary> => backupService.create(reason),
+    pauseTunnelForUpdate: async (): Promise<TunnelStatus> => {
+      const status = await tunnelController.stopForUpdate();
+      recordPersistentTunnelStatus(status);
+      return status;
+    },
     ensureDefaultWorkspace: async (rootPath: string): Promise<string> => {
       const existing = await workspaceService.list();
       const resolvedRoot = resolveHostPath(rootPath, process.platform);

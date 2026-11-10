@@ -304,11 +304,12 @@ function generatedNotes(repository, tag, previousTag) {
   return typeof response?.body === 'string' ? response.body : '';
 }
 
-function compareCommitEntries(repository, tag, previousTag) {
-  const local = localCommitEntries(repository, tag, previousTag);
+function compareCommitEntries(repository, tag, previousTag, commit) {
+  const comparisonTarget = commit || tag;
+  const local = localCommitEntries(repository, comparisonTarget, previousTag);
   if (local !== null) return local;
   if (!previousTag) return ['Initial public release.'];
-  const comparison = runGhJson(['api', `repos/${repository}/compare/${previousTag}...${tag}`]);
+  const comparison = runGhJson(['api', `repos/${repository}/compare/${previousTag}...${comparisonTarget}`]);
   const commits = Array.isArray(comparison?.commits) ? comparison.commits : [];
   return commitLinesToEntries(repository, commits.map((commit) => {
     const message = commit?.commit?.message?.split(/\r?\n/, 1)?.[0]?.trim();
@@ -348,12 +349,18 @@ function latestPublishedTag(repository, currentTag) {
   return releases.find((release) => release.tag_name !== currentTag)?.tag_name;
 }
 
-function futureReleaseMetadata(commit) {
+export function futureReleaseMetadata(commit, tag, releaseScope) {
   if (!commit) return [];
-  return [
-    `Published from the exact successful CI commit \`${commit}\`.`,
-    'Release artifacts include target-native Windows, macOS (arm64/x64), and Linux (x64/arm64) packages with `RELEASE_MANIFEST.json`, per-target provenance, and aggregate SHA-256 evidence. No package or build step runs in the tag workflow.',
-  ];
+  const currentScope = releaseScope?.version === tag?.replace(/^v/, '') ? releaseScope : null;
+  const platforms = currentScope?.targets?.map((target) => {
+    const labels = { 'win32-x64': 'Windows x64', 'darwin-arm64': 'macOS arm64', 'darwin-x64': 'macOS x64', 'linux-x64': 'Linux x64', 'linux-arm64': 'Linux arm64' };
+    if (!Object.hasOwn(labels, target)) throw new Error(`Unknown release target ${target}`);
+    return labels[target];
+  });
+  const artifactSummary = platforms
+    ? `Release artifacts include target-native ${platforms.join(', ')} packages with \`RELEASE_MANIFEST.json\`, per-target provenance and aggregate SHA-256 evidence. ${currentScope.automaticUpdaterEnabled === false ? 'Automatic installation is disabled; packages require manual installation. ' : ''}${currentScope.deferredTargets?.length ? `Targets held from this release: ${currentScope.deferredTargets.join(', ')}. ` : ''}No package or build step runs in the tag workflow.`
+    : 'Release artifacts include target-native Windows, macOS (arm64/x64), and Linux (x64/arm64) packages with `RELEASE_MANIFEST.json`, per-target provenance, and aggregate SHA-256 evidence. No package or build step runs in the tag workflow.';
+  return [`Published from the exact successful CI commit \`${commit}\`.`, artifactSummary];
 }
 
 async function generateOne(options) {
@@ -361,10 +368,10 @@ async function generateOne(options) {
   if (!options.tag) throw new Error('Missing tag. Pass --tag vX.Y.Z or set GITHUB_REF_NAME.');
 
   const previousTag = options.previousTag ?? latestPublishedTag(options.repository, options.tag);
-  const readme = await readFile(new URL('../README.md', import.meta.url), 'utf8');
-  const highlightEntries = extractCuratedHighlights(readme, options.tag, options.repository);
+  const releaseHistory = await readFile(new URL('../RELEASE_NOTES.md', import.meta.url), 'utf8');
+  const highlightEntries = extractCuratedHighlights(releaseHistory, options.tag, options.repository);
   if (highlightEntries.length === 0) {
-    throw new Error(`README.md needs a "What's new in ${options.tag}" section with real bullet points before release publication.`);
+    throw new Error(`RELEASE_NOTES.md needs a "What's new in ${options.tag}" section with real bullet points before release publication.`);
   }
   let sourceBody = '';
   try {
@@ -372,13 +379,14 @@ async function generateOne(options) {
   } catch (error) {
     console.warn(`GitHub generated notes unavailable for ${options.tag}: ${error instanceof Error ? error.message : String(error)}`);
   }
+  const releaseScope = JSON.parse(await readFile(new URL('../config/release-scope.json', import.meta.url), 'utf8'));
   const body = normalizeReleaseNotesBody({
     sourceBody,
     repository: options.repository,
     tag: options.tag,
     previousTag,
-    additionalOtherEntries: futureReleaseMetadata(options.commit),
-    additionalEntries: compareCommitEntries(options.repository, options.tag, previousTag),
+    additionalOtherEntries: futureReleaseMetadata(options.commit, options.tag, releaseScope),
+    additionalEntries: compareCommitEntries(options.repository, options.tag, previousTag, options.commit),
     highlightEntries,
   });
 

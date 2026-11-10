@@ -52,6 +52,9 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     taskResults: serviceProxy('taskResults', calls, () => ({workspaceId:'workspace-1',goalId:'goal-1',observedChanges:[],artifacts:[],evidenceCoverage:'partial'})),
     workflowTemplates: serviceProxy('workflowTemplates', calls, (method) => method === 'list' ? [] : {readiness:'ready'}),
     workflowStart: serviceProxy('workflowStart', calls, () => ({goalId:'goal-1',status:'active'})),
+    workspaceWriterLease: serviceProxy('workspaceWriterLease', calls, (method) => method === 'inspect'
+      ? { workspaceId: 'workspace-1', state: 'unleased', generation: 0, activeCalls: 0 }
+      : { leaseId: '00000000-0000-4000-8000-000000000001', leaseToken: 'smoke-test-only', generation: 1 }),
     workspaceInfo: serviceProxy('workspaceInfo', calls, (method, args) => {
       const requestedWorkspaceId = typeof args[1] === 'string' ? args[1] : 'workspace-1';
       const root = requestedWorkspaceId === 'ecc-workspace' ? runtimeEccWorkspaceRoot : process.cwd();
@@ -62,6 +65,7 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
     workspaceQuery: serviceProxy('workspaceQuery', calls, () => ({ entries: [] })),
     projectSnapshot: serviceProxy('projectSnapshot', calls, () => ({ workspaceId: 'workspace-1', files: 1 })),
     project: serviceProxy('project', calls, () => ({ kind: 'node', packageManager: 'pnpm' })),
+    engineeringCapture: serviceProxy('engineeringCapture', calls, () => ({ observationId: 'build-smoke', processId: 'process-1' })),
     engineeringPreparation: serviceProxy('engineeringPreparation', calls, (_method, args) => {
       const objective = typeof args[1] === 'string' ? args[1] : 'Fix the auth persistence bug';
       return {
@@ -118,6 +122,9 @@ export function createRuntimeSuccessServices(calls: string[]): McpApplicationSer
         { relativePath: 'src/second.test.ts', kind: 'file', language: 'typescript', isTest: true, symbols: ['second'], functions: [], classes: [], interfaces: [], imports: [], exports: [] },
       ] } }
       : { executed: true }),
+    repositoryImport: serviceProxy('repositoryImport', calls, (method) => method === 'start'
+      ? { taskId: 'import-smoke', state: 'running' }
+      : { taskId: 'import-smoke', state: method === 'cancel' ? 'cancelled' : 'running' }),
     git: serviceProxy('git', calls, (method) => {
       if (method === 'status') return { entries: [] };
       if (method === 'diff') return { patch: '', truncated: false };

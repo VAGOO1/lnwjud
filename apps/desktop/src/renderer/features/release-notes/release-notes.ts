@@ -21,6 +21,82 @@ export interface ReleaseNote {
 
 const RELEASE_NOTES: readonly ReleaseNote[] = [
   {
+    version: '5.9.1',
+    categories: [
+      {
+        id: 'safety',
+        titleKey: 'whatsNew.category.safety',
+        items: [
+          { id: 'writer-lease-idle-recovery', titleKey: 'whatsNew.591.lease.title', descriptionKey: 'whatsNew.591.lease.description', badge: 'fixed', tags: ['writer lease', 'same-client', 'fencing'] },
+          { id: 'signed-update-acceptance-pending', titleKey: 'whatsNew.591.updater.title', descriptionKey: 'whatsNew.591.updater.description', badge: 'improved', tags: ['Windows', 'updater', 'signed acceptance'] },
+        ],
+      },
+      {
+        id: 'experience',
+        titleKey: 'whatsNew.category.experience',
+        items: [
+          { id: 'settings-operator-update-test', titleKey: 'whatsNew.591.operator.title', descriptionKey: 'whatsNew.591.operator.description', badge: 'improved', tags: ['Settings', 'Titlebar', 'Updates', 'native'] },
+          { id: 'mcp-denial-diagnostics', titleKey: 'whatsNew.591.diagnostics.title', descriptionKey: 'whatsNew.591.diagnostics.description', badge: 'improved', tags: ['MCP', 'logs', 'diagnostics'] },
+        ],
+      },
+    ],
+  },
+  {
+    version: '5.9.0',
+    categories: [
+      {
+        id: 'safety',
+        titleKey: 'whatsNew.category.safety',
+        items: [
+          { id: 'managed-task-lifetime-proof', titleKey: 'whatsNew.590.tasks.title', descriptionKey: 'whatsNew.590.tasks.description', badge: 'improved', tags: ['Windows', 'Restricted', 'native containment', 'writer admission'] },
+          { id: 'writer-lease-orphan-recovery', titleKey: 'whatsNew.590.recovery.title', descriptionKey: 'whatsNew.590.recovery.description', badge: 'fixed', tags: ['Goal', 'writer lease', 'fencing', 'continuation'] },
+          { id: 'native-service-pipe-access', titleKey: 'whatsNew.590.pipeAccess.title', descriptionKey: 'whatsNew.590.pipeAccess.description', badge: 'fixed', tags: ['Windows', 'native service', 'IPC'] },
+          { id: 'repository-import-publication', titleKey: 'whatsNew.590.import.title', descriptionKey: 'whatsNew.590.import.description', badge: 'improved', tags: ['Git import', 'publication identity', 'recovery'] },
+          { id: 'update-recovery-and-availability', titleKey: 'whatsNew.590.updater.title', descriptionKey: 'whatsNew.590.updater.description', badge: 'improved', tags: ['Updates', 'handoff recovery', 'acceptance gate'] },
+          { id: 'manual-update-in-settings', titleKey: 'whatsNew.590.manualUpdates.title', descriptionKey: 'whatsNew.590.manualUpdates.description', badge: 'new', tags: ['Settings', 'manual update', 'Windows', 'Linux'] },
+          { id: 'file-publication-limits', titleKey: 'whatsNew.590.publication.title', descriptionKey: 'whatsNew.590.publication.description', badge: 'improved', tags: ['write_file', 'documentation', 'durability'] },
+        ],
+      },
+      {
+        id: 'experience',
+        titleKey: 'whatsNew.category.experience',
+        items: [
+          { id: 'engineering-gate-applicability', titleKey: 'whatsNew.590.engineering.title', descriptionKey: 'whatsNew.590.engineering.description', badge: 'improved', tags: ['Engineering Harness', 'applicability', 'evidence', 'readiness'] },
+          { id: 'wsl-workspace-paths', titleKey: 'whatsNew.590.wsl.title', descriptionKey: 'whatsNew.590.wsl.description', badge: 'fixed', tags: ['WSL', 'workspace', 'UNC'] },
+          { id: 'managed-writer-capacity', titleKey: 'whatsNew.590.capacity.title', descriptionKey: 'whatsNew.590.capacity.description', badge: 'fixed', tags: ['macOS', 'Linux', 'reservations', 'recovery', 'diagnostics'] },
+          { id: 'native-tooling-intent', titleKey: 'whatsNew.590.nativeTools.title', descriptionKey: 'whatsNew.590.nativeTools.description', badge: 'fixed', tags: ['Engineering Harness', 'platform intent'] },
+          { id: 'dashboard-unresolved-startup', titleKey: 'whatsNew.590.startup.title', descriptionKey: 'whatsNew.590.startup.description', badge: 'fixed', tags: ['Dashboard', 'startup', 'IPC'] },
+          { id: 'tunnel-stop-history', titleKey: 'whatsNew.590.tunnelStop.title', descriptionKey: 'whatsNew.590.tunnelStop.description', badge: 'fixed', tags: ['Tunnel', 'Stop', 'history'] },
+          { id: 'tunnel-stale-alias-recovery', titleKey: 'whatsNew.590.staleAlias.title', descriptionKey: 'whatsNew.590.staleAlias.description', badge: 'fixed', tags: ['Windows', 'Tunnel', 'Stop', 'Reset', 'ownership'] },
+          { id: 'ponytail-stable-skills', titleKey: 'whatsNew.590.ponytail.title', descriptionKey: 'whatsNew.590.ponytail.description', badge: 'improved', tags: ['Ponytail', 'v5.3.2', 'six skills', 'GitHub'] },
+        ],
+      },
+    ],
+  },
+  {
+    version: '5.8.7',
+    categories: [
+      {
+        id: 'safety',
+        titleKey: 'whatsNew.category.safety',
+        items: [
+          { id: 'safe-git-import', titleKey: 'whatsNew.587.import.title', descriptionKey: 'whatsNew.587.import.description', badge: 'new', tags: ['Git', 'HTTPS', 'NTFS', 'exact SHA'] },
+          { id: 'workspace-writer-safety', titleKey: 'whatsNew.587.writers.title', descriptionKey: 'whatsNew.587.writers.description', badge: 'improved', tags: ['write safety', 'lease', 'preflight'] },
+        ],
+      },
+      {
+        id: 'experience',
+        titleKey: 'whatsNew.category.experience',
+        items: [
+          { id: 'mcp-connector-identity', titleKey: 'whatsNew.587.connector.title', descriptionKey: 'whatsNew.587.connector.description', badge: 'fixed', tags: ['MCP', 'host approval', 'connector'] },
+          { id: 'scheduled-continuation-truth', titleKey: 'whatsNew.587.scheduled.title', descriptionKey: 'whatsNew.587.scheduled.description', badge: 'improved', tags: ['Scheduled Tasks', 'Goal', 'watcher'] },
+          { id: 'direct-mcp-passthrough', titleKey: 'whatsNew.587.mcpDirect.title', descriptionKey: 'whatsNew.587.mcpDirect.description', badge: 'fixed', tags: ['MCP', 'Playwright', 'Context7', 'structured output'] },
+          { id: 'tunnel-reset-alias', titleKey: 'whatsNew.587.tunnelReset.title', descriptionKey: 'whatsNew.587.tunnelReset.description', badge: 'fixed', tags: ['Tunnel', 'Reset All Settings', 'runtime alias', 'ownership'] },
+        ],
+      },
+    ],
+  },
+  {
     version: '5.8.6',
     categories: [
       {

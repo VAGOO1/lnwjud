@@ -1,4 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import path from 'node:path';
+import type { ManagedWriterAdmissionPort } from './writer-admission.js';
 import {
   appError,
   err,
@@ -11,7 +14,7 @@ import {
   type Result,
 } from '@lnwjud/domain';
 import { CommandPolicy, DefaultPermissionEngine, permissionProfiles, type PermissionEngine, type PermissionProfile } from '@lnwjud/permissions';
-import { ProcessManager, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@lnwjud/process';
+import { ProcessManager, type WindowsNativeAuthority, type LogQuery, type ManagedProcess, type ManagedProcessStart, type ProcessLogResult } from '@lnwjud/process';
 import { JsCommandDetector, ProjectDetector, type ProjectCommandKind } from '@lnwjud/project';
 import { prohibitedAgentCommandReason, riskyAgentCommandReason } from '@lnwjud/shared';
 import { isAbsoluteHostPath, isHostPathWithin, resolveHostPath, WorkspacePathGuard, type Workspace, type WorkspaceRepository } from '@lnwjud/workspace';
@@ -27,7 +30,7 @@ export interface ProcessStartRequest {
 }
 
 export interface ProcessManagerPort {
-  start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void): Promise<Result<ManagedProcess>>;
+  start(spec: ManagedProcessStart, signal?: AbortSignal, onCreated?: (process: ManagedProcess) => void, onVerifiedNativeTermination?: () => void | Promise<void>): Promise<Result<ManagedProcess>>;
   list?(): readonly ManagedProcess[];
   status(processId: string): Result<ManagedProcess>;
   logs(processId: string, query: LogQuery): Result<ProcessLogResult>;
@@ -39,6 +42,9 @@ export interface ProjectCommandSource {
 }
 
 export interface ProcessServiceDependencies {
+  readonly writerAdmission?: ManagedWriterAdmissionPort;
+  readonly nativeContainmentRoot?: string;
+  readonly nativeAuthority?: WindowsNativeAuthority;
   readonly processManager?: ProcessManagerPort;
   readonly projectService?: ProjectCommandSource;
   readonly guard?: WorkspacePathGuard;
@@ -63,6 +69,8 @@ type CommandSource = 'client' | 'project';
 
 export class ProcessService {
   private readonly processManager: ProcessManagerPort;
+  private readonly writerAdmission: ManagedWriterAdmissionPort | undefined;
+  private readonly nativeContainmentRoot: string | undefined;
   private readonly projectService: ProjectCommandSource;
   private readonly guard: WorkspacePathGuard;
   private readonly permissionEngine: PermissionEngine;
@@ -77,7 +85,9 @@ export class ProcessService {
     private readonly workspaces: WorkspaceRepository,
     dependencies: ProcessServiceDependencies = {},
   ) {
-    this.processManager = dependencies.processManager ?? new ProcessManager();
+    this.nativeContainmentRoot = dependencies.nativeContainmentRoot;
+    this.writerAdmission = dependencies.writerAdmission;
+    this.processManager = dependencies.processManager ?? new ProcessManager(undefined, undefined, undefined, undefined, dependencies.nativeContainmentRoot, dependencies.nativeAuthority);
     this.projectService = dependencies.projectService ?? new ProjectService(
       workspaces,
       new ProjectDetector(),
@@ -243,14 +253,38 @@ export class ProcessService {
 
     if (isAborted(signal)) return cancelledStart();
     const timeoutMs = request.timeoutMs ?? this.defaultTimeoutMsProvider?.();
+    if (this.writerAdmission !== undefined && process.platform === 'win32' && this.nativeContainmentRoot === undefined) {
+      return err(appError('CONFLICT', 'Windows native process containment is required while managed writer admission is enabled'));
+    }
+    const containmentId = this.writerAdmission === undefined ? undefined : randomUUID();
+    const nativeReceiptPath = containmentId !== undefined && this.nativeContainmentRoot !== undefined && process.platform === 'win32'
+      ? path.join(this.nativeContainmentRoot, containmentId, 'containment.receipt.json') : undefined;
+    const reservation = this.writerAdmission === undefined ? undefined : await this.writerAdmission.enter({
+      actorClientId: actor.clientId,
+      actorSessionId: actorSessionId(actor),
+      ...(containmentId === undefined ? {} : { nativeTaskId: containmentId }),
+      workspaceId,
+      kind: nativeReceiptPath === undefined ? 'uncontained_process' : 'contained_process',
+      ...(nativeReceiptPath === undefined ? {} : { nativeReceiptPath }),
+    });
+    if (reservation !== undefined && !reservation.ok) return reservation;
+    let processCreated = false;
     const started = await this.processManager.start({
       executable: request.executable,
       args: [...request.args],
       cwd: cwd.value,
+      ...(containmentId === undefined ? {} : { containmentId }),
+      ...(reservation?.ok && reservation.value.nativeBinding !== undefined ? { nativeBinding: reservation.value.nativeBinding } : {}),
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     }, signal, (process) => {
+      processCreated = true;
       this.owners.set(process.processId, { actorId: actor.clientId, sessionId: actorSessionId(actor), workspaceId });
-    });
+    }, async () => { if (reservation?.ok) await reservation.value.releaseAfterVerifiedTermination(); });
+    if (!started.ok && !processCreated && reservation?.ok) {
+      // Only authenticated no-launch proof may free a failed writer admission.
+      // An ambiguous native launch remains reserved until terminal verification.
+      await reservation.value.abortBeforeLaunch?.().catch(() => undefined);
+    }
     if (started.ok && isAborted(signal)) {
       // A process can be spawned just before goal cancellation aborts the
       // request. Stop that provisional child before returning so it cannot

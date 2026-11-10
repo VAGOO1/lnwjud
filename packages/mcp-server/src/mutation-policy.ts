@@ -120,6 +120,10 @@ export function inspectMutationOperation(
       return opaque('automation_finalize terminates the root Goal and may stop in-flight requests or tracked tasks');
     case 'workspace_register':
       return boundedWrite('workspace_register adds a validated project registration without changing project files');
+    case 'workspace_index':
+    case 'workspace_index_watch':
+    case 'workspace_index_stop':
+      return boundedWrite(`${toolName} changes persisted workspace indexing or watcher state`);
     case 'write_file':
       return value.overwriteExisting === true
         ? replace('write_file explicitly replaces existing file content')

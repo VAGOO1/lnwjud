@@ -19,7 +19,7 @@ describe('durable goal MCP tools', () => {
     const context = { actor, contextEconomy: new ContextEconomyRuntime(), services: {} } as McpToolContext;
     const byName = new Map(goalTools(context).map((entry) => [entry.name, entry]));
     expect([...byName.keys()]).toEqual([
-      'run_goal', 'get_goal', 'get_goal_plan', 'update_goal_plan', 'update_goal_acceptance', 'revise_goal_intent',
+      'recover_blocked_goal', 'run_goal', 'get_goal', 'get_goal_plan', 'update_goal_plan', 'update_goal_acceptance', 'revise_goal_intent',
       'create_context_capsule', 'get_context_capsule', 'list_context_capsules', 'context_pressure',
       'record_delivery_receipt', 'list_delivery_receipts', 'advance_goal_iteration',
       'checkpoint_goal', 'checkpoint_goal_engineering', 'finish_goal', 'cancel_goal', 'reconcile_goals', 'list_goals',
@@ -39,7 +39,7 @@ describe('durable goal MCP tools', () => {
     expect(byName.get('cancel_goal')?.description).toContain('aborts in-flight fenced MCP requests');
     expect(byName.get('cancel_goal')?.description).toContain('status=skipped');
     expect(byName.get('cancel_goal')?.description).toContain('provider that is unavailable');
-    expect(byName.get('run_goal')?.description).toContain('before the first mutation of any non-trivial multi-step change');
+    expect(byName.get('run_goal')?.description).toContain('acquire the existing durable Goal when working through it');
     expect(byName.get('run_goal')?.description).toContain('hourly recurring watchdog');
     expect(byName.get('run_goal')?.description).toContain('scheduledContinuation=auto');
     expect(byName.get('run_goal')?.description).toContain('without waiting for the user to type continue/ทำต่อ');
@@ -105,6 +105,8 @@ describe('durable goal MCP tools', () => {
         source: 'host_observed', observedAt: '2026-09-28T00:00:00.000Z', workspaceId: 'workspace-1',
         commit: '33e1419', command: 'git diff --check', runId: 'host-task-1', exitCode: 0,
         conclusion: 'passed', artifact: 'diff-check.log',
+        sourceDigest: 'a'.repeat(64), artifactDigest: 'b'.repeat(64),
+        contractDigest: 'c'.repeat(64), observationId: 'observation-1',
       } },
       { gateId: 'docs_impact', status: 'not_applicable', reason: 'No documentation change is needed.' },
     ];
@@ -136,6 +138,29 @@ describe('durable goal MCP tools', () => {
     expect(checkpointRequests[0]).toMatchObject({ engineeringGateUpdates, engineeringReviewFindings });
     expect(checkpointRequests[1]).toMatchObject({ engineeringGateUpdates, engineeringReviewFindings });
     expect(engineeringCheckpointTool.inputSchema).toBe(checkpointTool.inputSchema);
+  });
+
+  it('returns a current Engineering binding after a checkpoint while retaining the lease', async () => {
+    const context = {
+      actor,
+      contextEconomy: new ContextEconomyRuntime(),
+      services: { goals: { async checkpointGoal() {
+        return ok({ goalId: 'goal-1', revision: 8, userIntentRevision: 2, engineering: { policyDigest: 'policy-1', scopedPath: 'src' } });
+      } } },
+    } as unknown as McpToolContext;
+    const checkpoint = tool(context, 'checkpoint_goal');
+    const input = { goalId: 'goal-1', leaseToken: 'lease-token', expectedRevision: 7, currentPhase: 'work', summary: 'Continue', stepUpdates: [], nextAction: 'Work', blockers: [], evidence: [], trackedTasks: [] };
+    for (const releaseLease of [false, true]) {
+      const parsed = checkpoint.parse({ ...input, releaseLease });
+      if (!parsed.ok) throw new Error('checkpoint input was rejected');
+      const result = await checkpoint.execute(parsed.value, new AbortController().signal);
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error('checkpoint failed');
+      expect(result.value).toMatchObject(releaseLease ? { revision: 8 } : { engineeringTask: {
+        goalId: 'goal-1', policyDigest: 'policy-1', goalRevision: 8, userIntentRevision: 2, scopedPath: 'src', sessionId: 'session-a',
+      } });
+      if (releaseLease) expect(result.value).not.toHaveProperty('engineeringTask');
+    }
   });
 
   it('run_goal returns immediately and never invokes process/capability execution', async () => {

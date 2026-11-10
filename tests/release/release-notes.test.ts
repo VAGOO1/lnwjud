@@ -7,7 +7,7 @@ const repositoryRoot = path.resolve(import.meta.dirname, '..', '..');
 const releaseNotesModuleUrl = pathToFileURL(path.join(repositoryRoot, 'scripts', 'release-notes.mjs')).href;
 
 describe('standardized GitHub release notes', () => {
-  it('keeps the three newest README versions and historical highlights for backfill', async () => {
+  it('keeps changelogs out of the READMEs while preserving exact-version highlights for GitHub Releases', async () => {
     const { extractCuratedHighlights } = await import(releaseNotesModuleUrl);
     const [readme, fullReadme, releaseHistory, packageContents] = await Promise.all([
       readFile(path.join(repositoryRoot, 'README.md'), 'utf8'),
@@ -21,14 +21,24 @@ describe('standardized GitHub release notes', () => {
       (match) => match[1],
     );
 
-    expect(versions(readme)).toHaveLength(3);
-    expect(versions(readme)[0]).toBe(currentVersion);
-    expect(versions(fullReadme)).toEqual(versions(readme));
-    expect(readme).toContain('[RELEASE_NOTES.md](RELEASE_NOTES.md)');
-    expect(fullReadme).toContain('[RELEASE_NOTES.md](RELEASE_NOTES.md)');
-    for (const version of [...versions(readme), '5.8.3', '5.6.1', '4.52.0']) {
+    expect(versions(readme)).toHaveLength(0);
+    expect(versions(fullReadme)).toHaveLength(0);
+    expect(versions(releaseHistory)).toContain(currentVersion);
+    for (const version of [currentVersion, '5.8.3', '5.6.1', '4.52.0']) {
       expect(extractCuratedHighlights(releaseHistory, `v${version}`, 'engasnm111/lnwjud')).not.toEqual([]);
     }
+  });
+
+  it('reports only actual release-scope targets and manual installation in exact-version notes', async () => {
+    const { futureReleaseMetadata } = await import(releaseNotesModuleUrl);
+    const releaseScope = JSON.parse(await readFile(path.join(repositoryRoot, 'config/release-scope.json'), 'utf8')) as {
+      version: string; targets: string[]; deferredTargets: string[]; automaticUpdaterEnabled: boolean;
+    };
+    const entries = futureReleaseMetadata('a'.repeat(40), `v${releaseScope.version}`, releaseScope);
+    expect(entries.join(' ')).toContain('Windows x64, Linux x64, Linux arm64');
+    expect(entries.join(' ')).toContain('Automatic installation is disabled');
+    expect(entries.join(' ')).toContain('Targets held from this release: darwin-arm64, darwin-x64');
+    expect(entries.join(' ')).not.toContain('target-native Windows, macOS');
   });
 
   it('classifies conventional entries into the three mandatory sections', async () => {

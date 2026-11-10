@@ -15,6 +15,46 @@ const actor: FileActor = {
 };
 
 describe('MCP server live tool availability', () => {
+  it('allows direct content-only external MCP results while preserving batch parity', async () => {
+    const server = createMcpServer({
+      services: { extensions: {
+        callMcpTool: async (input: { tool: string }) => ok({
+          ...(input.tool === 'failure' ? { isError: true } : {}),
+          content: [{ type: 'text', text: input.tool === 'failure' ? 'child failed' : 'child text response' }],
+        }),
+      } } as unknown as McpApplicationServices,
+      actor,
+      authorizationModeProvider: () => 'full_bypass',
+    });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'content-only-child-test-client', version: '1.0.0' });
+    try {
+      await server.connect(serverTransport);
+      await client.connect(clientTransport);
+      const tool = (await client.listTools()).tools.find((item) => item.name === 'mcp_call');
+      expect(tool).toBeDefined();
+      expect(tool?.outputSchema).toBeUndefined();
+      const args = { server: 'mock', tool: 'content', userConfirmed: true };
+      const direct = await client.callTool({ name: 'mcp_call', arguments: args });
+      expect(direct.isError).not.toBe(true);
+      expect(direct.structuredContent).toBeUndefined();
+      expect(direct.content).toEqual([{ type: 'text', text: 'child text response' }]);
+      const batched = await client.callTool({ name: 'tool_batch', arguments: {
+        calls: [{ id: 'content-only', tool: 'mcp_call', arguments: args }],
+        userConfirmed: true,
+      } });
+      expect(batched.structuredContent).toMatchObject({
+        summary: { succeeded: 1, failed: 0 },
+        results: [{ id: 'content-only', status: 'succeeded', value: { content: [{ text: 'child text response' }] } }],
+      });
+      const childFailure = await client.callTool({ name: 'mcp_call', arguments: { ...args, tool: 'failure' } });
+      expect(childFailure.isError).toBe(true);
+      expect(childFailure.content).toEqual([{ type: 'text', text: 'child failed' }]);
+    } finally {
+      await client.close().catch(() => undefined);
+      await server.close().catch(() => undefined);
+    }
+  });
   it('serves strict optional Engineering checkpoint metadata through the SDK tools/list response', async () => {
     const checkpointGoal = vi.fn(async () => ok({ goalId: 'goal-1', revision: 2 } as never));
     const server = createMcpServer({

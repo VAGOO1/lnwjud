@@ -362,7 +362,7 @@ describe('Ponytail ToolRegistry enforcement', () => {
         dependsOn: [],
       }],
     });
-    expect(result.isError).not.toBe(true);
+    expect(result.isError).toBe(true);
     expect(result.structuredContent).toMatchObject({
       summary: { failed: 1, succeeded: 0 },
       results: [{ status: 'failed', error: { code: 'CONFLICT', message: expect.stringContaining('Ponytail FULL is active') } }],

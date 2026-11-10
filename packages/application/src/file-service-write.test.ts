@@ -7,6 +7,7 @@ import { AtomicFileWriter, type AtomicWriteOptions } from '@lnwjud/filesystem';
 import { permissionProfiles } from '@lnwjud/permissions';
 import { WorkspacePathGuard, type Checkpoint, type Workspace, type WorkspaceRepository } from '@lnwjud/workspace';
 import { FileService, type CheckpointServicePort } from './file-service.js';
+import type { ManagedWriterAdmissionLease } from './writer-admission.js';
 
 const temporaryRoots: string[] = [];
 const actor = { clientId: 'client-1', clientName: 'test' };
@@ -44,6 +45,52 @@ function checkpointService(): CheckpointServicePort & { calls: string[][] } {
 }
 
 describe('FileService writes', () => {
+  it('does not write when managed-writer admission is unverified', async () => {
+    const workspace = await createWorkspace();
+    const target = path.join(workspace.rootPath, 'src', 'not-created.txt');
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      profile: permissionProfiles.full,
+      writerAdmission: {
+        async enter(): Promise<Result<ManagedWriterAdmissionLease>> { throw new Error('private reservation backend path must not be returned'); },
+      },
+    });
+    const result = await service.writeFile(actor, workspace.id, { path: target, content: 'never written' });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', message: expect.stringContaining('admission could not be verified') },
+    });
+    expect(JSON.stringify(result)).not.toContain('private reservation backend');
+    await expect(readFile(target, 'utf8')).rejects.toThrow();
+  });
+
+  it('reports an uncertain mutation outcome when the writer reservation cannot be released', async () => {
+    const workspace = await createWorkspace();
+    const target = path.join(workspace.rootPath, 'src', 'possibly-committed.txt');
+    let releaseCalls = 0;
+    const service = new FileService(repository(workspace), undefined, undefined, {
+      profile: permissionProfiles.full,
+      writerAdmission: {
+        async enter(): Promise<Result<ManagedWriterAdmissionLease>> {
+          return ok({
+            id: 'held-writer',
+            async releaseAfterVerifiedTermination(): Promise<void> {
+              releaseCalls += 1;
+              throw new Error('private reservation location');
+            },
+          });
+        },
+      },
+    });
+    const result = await service.writeFile(actor, workspace.id, { path: target, content: 'already committed', mode: 'create_new' });
+    expect(result).toMatchObject({
+      ok: false,
+      error: { code: 'CONFLICT', message: expect.stringContaining('may already have been applied') },
+    });
+    expect(JSON.stringify(result)).not.toContain('private reservation location');
+    expect(releaseCalls).toBe(1);
+    await expect(readFile(target, 'utf8')).resolves.toBe('already committed');
+  });
+
   it('uses Full Bypass for exact outside-workspace file operations without inventing recovery evidence', async () => {
     const workspace = await createWorkspace();
     const outsideRoot = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-file-outside-'));
@@ -121,6 +168,37 @@ describe('FileService writes', () => {
     expect(result).toMatchObject({ ok: true, value: { checkpointId: 'checkpoint-1' } });
     expect(checkpoints.calls).toEqual([[path.join('src', 'file.txt')]]);
     await expect(readFile(path.join(workspace.rootPath, 'src', 'file.txt'), 'utf8')).resolves.toBe('after');
+  });
+
+  it('permits exactly one create_new between independent Full-profile client sessions', async () => {
+    const workspace = await createWorkspace();
+    const target = path.join(workspace.rootPath, 'src', 'competing.md');
+    const first = new FileService(repository(workspace), undefined, undefined, { profile: permissionProfiles.full });
+    const second = new FileService(repository(workspace), undefined, undefined, { profile: permissionProfiles.full });
+    const [one, two] = await Promise.all([
+      first.writeFile({ ...actor, clientId: 'independent-a' }, workspace.id, {
+        path: target, content: 'from-A', mode: 'create_new',
+      }),
+      second.writeFile({ ...actor, clientId: 'independent-b' }, workspace.id, {
+        path: target, content: 'from-B', mode: 'create_new',
+      }),
+    ]);
+    const successes = [one, two].filter((value) => value.ok);
+    expect(successes).toHaveLength(1);
+    expect([one, two].find((value) => !value.ok)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    await expect(readFile(target, 'utf8')).resolves.toBe(one.ok ? 'from-A' : 'from-B');
+  });
+
+  it('refuses explicit no-replace under Full without changing existing bytes', async () => {
+    const workspace = await createWorkspace();
+    const target = path.join(workspace.rootPath, 'src', 'file.txt');
+    await writeFile(target, 'original', 'utf8');
+    const service = new FileService(repository(workspace), undefined, undefined, { profile: permissionProfiles.full });
+    for (const options of [{ overwriteExisting: false }, { mode: 'create_new' as const }]) {
+      const result = await service.writeFile(actor, workspace.id, { path: target, content: 'new', ...options });
+      expect(result).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+      await expect(readFile(target, 'utf8')).resolves.toBe('original');
+    }
   });
 
   it('captures a checkpoint before atomically overwriting an existing file', async () => {

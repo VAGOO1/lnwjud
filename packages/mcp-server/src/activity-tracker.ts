@@ -186,6 +186,7 @@ export class ActivityTracker {
     traceContext?: TraceContext,
     authorizationMode?: ActivitySinkEvent['authorizationMode'],
   ): Promise<string> {
+    input = projectImportAuditInput(toolName, input);
     const callId = randomUUID();
     const timestamp = new Date().toISOString();
     const workspaceId = readWorkspaceId(input);
@@ -310,6 +311,39 @@ export class ActivityTracker {
       try { listener(event); } catch { /* Watcher subscribers must never fail tool execution. */ }
     }
   }
+}
+
+function projectImportAuditInput(toolName: string, input: unknown): unknown {
+  if (toolName === 'git_clone_safe') {
+    if (!isRecord(input)) return { operation: 'start', input: { kind: Array.isArray(input) ? 'array' : typeof input } };
+    try {
+      const descriptors = Object.getOwnPropertyDescriptors(input);
+      const expected = ['workspaceId', 'requestId', 'url', 'destination', 'commit'];
+      const allowed = new Set(expected);
+      const fields = Object.fromEntries(expected.map((name) => {
+        const descriptor = descriptors[name];
+        if (descriptor === undefined) return [name, 'missing'];
+        if (!('value' in descriptor)) return [name, 'accessor'];
+        const value: unknown = descriptor.value;
+        return [name, value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value];
+      }));
+      const unexpectedFields = Reflect.ownKeys(descriptors).filter((key) => typeof key !== 'string' || !allowed.has(key)).length;
+      return { operation: 'start', input: { kind: 'object', fields, unexpectedFields } };
+    } catch {
+      return { operation: 'start', input: { kind: 'uninspectable' } };
+    }
+  }
+  if (toolName !== 'tool_batch') return input;
+  const project = (value: unknown, depth: number): unknown => {
+    if (depth > 16) return '[omitted]';
+    if (Array.isArray(value)) return value.map((entry) => project(entry, depth + 1));
+    if (!isRecord(value)) return value;
+    if (value.tool === 'git_clone_safe') {
+      return { tool: 'git_clone_safe', arguments: projectImportAuditInput('git_clone_safe', value.arguments) };
+    }
+    return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, project(entry, depth + 1)]));
+  };
+  return project(input, 0);
 }
 
 export interface DescribedToolTarget {
@@ -646,7 +680,7 @@ function summarizeForLog(value: string): string {
 }
 
 function redactSensitiveLogText(value: string): string {
-  return value
+  return new Redactor().redactText(value)
     .replace(/(\bauthorization\s*:\s*bearer\s+)[^\s]+/gi, '$1[redacted]')
     .replace(/\b(token|secret|password|api[_-]?key|private[_-]?key)\s*[:=]\s*[^\s]+/gi, '$1=[redacted]');
 }
