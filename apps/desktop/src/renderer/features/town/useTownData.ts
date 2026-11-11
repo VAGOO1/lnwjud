@@ -41,9 +41,11 @@ export function useTownData(workspaceId: string | null): TownData {
       if (busy || document.visibilityState !== 'visible' || workspaceId === null) return;
       busy = true;
       try {
-        const [dashboard, goals] = await Promise.all([
+        const [dashboard, goals, approvals] = await Promise.all([
           window.lnwjud.getDashboard(),
           window.lnwjud.getDoctorGoals({ workspaceId, view: 'results' }),
+          // A failed approval read only blanks the approval count; it must not hide other evidence.
+          window.lnwjud.getPendingApprovalCount().then((value) => value.pending, () => null),
         ]);
         const chosen = [...goals]
           .sort((a, b) => Number(b.status === 'active') - Number(a.status === 'active') || b.updatedAt.localeCompare(a.updatedAt))
@@ -61,18 +63,18 @@ export function useTownData(workspaceId: string | null): TownData {
         if (partial) {
           setInput((previous) => ({
             workspaceId, observedAt: lastGood.current?.observedAt ?? null, fetchFailed: true,
-            dashboard: previous?.dashboard ?? null, goalOptions: previous?.goalOptions ?? [], taskResults: previous?.taskResults ?? [],
+            dashboard: previous?.dashboard ?? null, goalOptions: previous?.goalOptions ?? [], taskResults: previous?.taskResults ?? [], pendingApprovals: null,
           }));
           return;
         }
         const observedAt = new Date().toISOString();
         lastGood.current = { observedAt, goalOptions: chosen, taskResults, dashboard };
-        setInput({ workspaceId, observedAt, fetchFailed: false, dashboard, goalOptions: chosen, taskResults });
+        setInput({ workspaceId, observedAt, fetchFailed: false, dashboard, goalOptions: chosen, taskResults, pendingApprovals: approvals });
       } catch {
         if (!active) return;
         setInput((previous) => ({
           workspaceId, observedAt: lastGood.current?.observedAt ?? null, fetchFailed: true,
-          dashboard: previous?.dashboard ?? null, goalOptions: previous?.goalOptions ?? [], taskResults: previous?.taskResults ?? [],
+          dashboard: previous?.dashboard ?? null, goalOptions: previous?.goalOptions ?? [], taskResults: previous?.taskResults ?? [], pendingApprovals: null,
         }));
       } finally {
         busy = false;

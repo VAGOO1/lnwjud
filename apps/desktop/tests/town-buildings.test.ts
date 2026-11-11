@@ -23,6 +23,7 @@ function input(overrides: Partial<TownAdapterInput> = {}): TownAdapterInput {
       checks: [{ name: 'a', status: 'passed' }, { name: 'b', status: 'failed' }, { name: 'c', status: 'pending' }],
       blockers: [], evidenceCoverage: 'complete',
     }],
+    pendingApprovals: 2,
     ...overrides,
   };
 }
@@ -41,7 +42,7 @@ describe('town building facts', () => {
     const data = input({ observedAt: ago(600) });
     const board = deriveTown(buildTownSnapshot(data), policy).board;
     expect(board.trust).toBe('unknown');
-    expect(deriveBuildingFacts(data, board)).toEqual({ gate: { mcpRunning: null }, hall: null, review: null, archive: null, forge: null, peak: null, plaza: null });
+    expect(deriveBuildingFacts(data, board)).toEqual({ gate: { mcpRunning: null }, hall: null, review: null, archive: null, forge: null, peak: null, plaza: null, approval: null });
   });
 
   it('shows nothing when the last read failed', () => {
@@ -77,5 +78,14 @@ describe('town building facts', () => {
     const data = input({ dashboard: null });
     const facts = deriveBuildingFacts(data, deriveTown(buildTownSnapshot(data), policy).board);
     expect([facts.forge, facts.peak, facts.plaza]).toEqual([null, null, null]);
+  });
+
+  it('shows the waiting-approval count only, and unknown when it could not be read', () => {
+    const ok = input();
+    expect(deriveBuildingFacts(ok, deriveTown(buildTownSnapshot(ok), policy).board).approval).toEqual({ pending: 2 });
+    const unread = input({ pendingApprovals: null });
+    expect(deriveBuildingFacts(unread, deriveTown(buildTownSnapshot(unread), policy).board).approval).toBeNull();
+    const stale = input({ observedAt: ago(600) });
+    expect(deriveBuildingFacts(stale, deriveTown(buildTownSnapshot(stale), policy).board).approval).toBeNull();
   });
 });

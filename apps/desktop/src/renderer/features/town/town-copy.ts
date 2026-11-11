@@ -60,7 +60,7 @@ export interface TownCopy {
   readonly archiveFacts: (n: number) => string;
   readonly board: string; readonly colWorking: string; readonly colDone: string; readonly colStuck: string;
   readonly colOwner: string; readonly colUnverified: string; readonly empty: string;
-  readonly ownerUnsupported: string; readonly unverifiedHint: string;
+  readonly unverifiedHint: string;
   readonly resting: string; readonly previously: string;
   readonly activeAi: string; readonly aiUnknown: string; readonly aiVisibilityNote: string;
   readonly plaza: string; readonly forge: string; readonly peak: string;
@@ -69,6 +69,7 @@ export interface TownCopy {
   readonly forgeFacts: (installed: boolean, version: string | null, running: number) => string;
   readonly peakFacts: (running: number) => string;
   readonly notSupported: string; readonly demoOnly: string;
+  readonly approvalFacts: (n: number) => string; readonly approvalHint: string;
   readonly aiCalls: (n: number) => string; readonly byAi: string;
 }
 
@@ -87,7 +88,6 @@ const TH: TownCopy = {
   archiveFacts: (n) => `เป้าหมายที่มีบันทึกความคืบหน้า ${n} รายการ`,
   board: 'Mission Board · กระดานภารกิจ', colWorking: 'กำลังทำ', colDone: 'สำเร็จ (ยืนยันแล้ว)',
   colStuck: 'ติดขัด', colOwner: 'รอเจ้าของอนุมัติ', colUnverified: 'ยังไม่ยืนยัน', empty: 'ไม่มีรายการ',
-  ownerUnsupported: 'ยังไม่รองรับ: แอปยังไม่ส่งรายการรออนุมัติมาให้หน้านี้ จึงไม่แสดงตัวเลขเพื่อไม่ให้เข้าใจผิดว่า "ไม่มี"',
   unverifiedHint: 'เสร็จหรือกำลังทำ แต่ยังพิสูจน์ไม่ได้ จึงไม่นับเป็นสำเร็จ',
   resting: 'พัก', previously: 'รายงานก่อนหน้า',
   activeAi: 'AI ที่กำลังใช้งานผ่าน lnwjud', aiUnknown: 'ไม่ทราบชื่อ AI',
@@ -101,6 +101,8 @@ const TH: TownCopy = {
   peakFacts: (running) => `งานค้นหา/ค้นคว้าที่รันอยู่ ${running}`,
   notSupported: 'ยังไม่รองรับ: ยังไม่มีข้อมูลจริงส่งมาให้หน้านี้ จึงไม่แสดงสถานะ (ไม่ใช่ "ว่าง")',
   demoOnly: 'ตัวอย่างเท่านั้น ยังไม่มีข้อมูลจริง ไม่แสดงสถานะการทำงาน',
+  approvalFacts: (n) => n === 0 ? 'ไม่มีคำขอรออนุมัติ' : `มี ${n} คำขอรอเจ้าของอนุมัติ`,
+  approvalHint: 'นับทั้งแอป ตอบได้ที่หน้าต่างอนุมัติที่เด้งขึ้นเท่านั้น หน้านี้ไม่มีปุ่มอนุมัติและไม่แสดงเนื้อหาคำขอ',
 };
 
 const EN: TownCopy = {
@@ -117,7 +119,6 @@ const EN: TownCopy = {
   archiveFacts: (n) => `${n} goal(s) with a checkpoint`,
   board: 'Mission Board', colWorking: 'Working', colDone: 'Done (verified)', colStuck: 'Stuck',
   colOwner: 'Awaiting owner approval', colUnverified: 'Unverified', empty: 'Nothing here',
-  ownerUnsupported: 'Not supported yet: the app does not send the approval queue to this page, so no number is shown rather than a misleading "none".',
   unverifiedHint: 'Finished or running but not provable, so not counted as done.',
   resting: 'Resting', previously: 'Previously reported',
   activeAi: 'AIs working through lnwjud', aiUnknown: 'AI name unknown',
@@ -130,6 +131,8 @@ const EN: TownCopy = {
   peakFacts: (running) => `Look-up calls running ${running}`,
   notSupported: 'Not supported yet: no real data is sent to this page, so no status is shown (this is not "idle").',
   demoOnly: 'Demo only: no real data, so no working status is shown.',
+  approvalFacts: (n) => n === 0 ? 'No approvals waiting' : `${n} approval(s) waiting for the owner`,
+  approvalHint: 'Counted app-wide. Answer only in the approval window that pops up; this page has no approve button and never shows the request.',
 };
 
 const COPY: Readonly<Record<UiLocale, TownCopy>> = { th: TH, en: EN };
