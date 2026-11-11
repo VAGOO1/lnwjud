@@ -54,7 +54,7 @@ function goal(overrides: Partial<TownGoalEvidence> = {}): TownGoalEvidence {
   };
 }
 
-const runningCall = { callId: 'call-1', toolName: 'write_file', startedAt: secondsAgo(5) };
+const runningCall = { callId: 'call-1', toolName: 'write_file', startedAt: secondsAgo(5), clientName: null };
 const verifiedGoal = (): TownGoalEvidence => goal({
   status: 'completed',
   checks: [{ name: 'tests', status: 'passed' }],

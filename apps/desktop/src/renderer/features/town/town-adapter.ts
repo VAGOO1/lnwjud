@@ -36,7 +36,9 @@ export interface TownAdapterInput {
   readonly observedAt: string | null;
   /** True if the latest read of any source failed. */
   readonly fetchFailed: boolean;
-  readonly dashboard: Pick<DashboardSnapshot, 'mcp' | 'agentState' | 'inFlight'> | null;
+  readonly dashboard: Pick<DashboardSnapshot, 'mcp' | 'agentState'> & {
+    readonly inFlight: readonly Pick<DashboardSnapshot['inFlight'][number], 'callId' | 'toolName' | 'startedAt' | 'clientName'>[];
+  } | null;
   readonly goalOptions: readonly Pick<DoctorGoalOption, 'goalId' | 'goalKey'>[];
   readonly taskResults: readonly TownTaskResultInput[];
 }
@@ -60,6 +62,7 @@ export function buildTownSnapshot(input: TownAdapterInput): TownSnapshot {
           callId: item.callId,
           toolName: item.toolName,
           startedAt: item.startedAt,
+          clientName: item.clientName ?? null,
         })),
       };
   const keyById = new Map(input.goalOptions.map((goal) => [goal.goalId, goal.goalKey] as const));
