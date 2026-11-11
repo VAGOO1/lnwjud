@@ -40,6 +40,7 @@ import { SettingsPage, type SettingsFocusTarget, type SettingsSection } from './
 import { DoctorPanel } from './features/doctor/DoctorPanel.js';
 import { DiagnosticsPage } from './features/doctor/DiagnosticsPage.js';
 import { ToolsPage } from './features/tools/ToolsPage.js';
+import { TownPage } from './features/town/TownPage.js';
 import { remediationNavigationForTarget } from './features/tools/remediation-navigation.js';
 import { FirstRunTunnelTip } from './features/onboarding/FirstRunTunnelTip.js';
 import {
@@ -1149,6 +1150,9 @@ export function App(): ReactElement {
           onGuidedTunnelLocalComplete={completeGuidedTunnelSetup}
           requestedSection={requestedSettingsSection}
         />
+      ) : null}
+      {screen === 'town' ? (
+        <TownPage locale={locale} workspaceId={selectedWorkspaceId} />
       ) : null}
       {screen === 'workflows' ? (
         <WorkflowsPage locale={locale} workspaceId={selectedWorkspaceId} workspacePath={dashboard?.selectedWorkspace?.rootPath ?? null} />

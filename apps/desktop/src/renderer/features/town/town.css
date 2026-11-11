@@ -1,0 +1,53 @@
+.town-page { display: flex; flex-direction: column; gap: 12px; }
+.town-live-badge { white-space: nowrap; }
+.town-map {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-areas: "gate hall review" "archive compass compass";
+  gap: 12px;
+}
+.town-gate { grid-area: gate; }
+.town-hall { grid-area: hall; }
+.town-review { grid-area: review; }
+.town-archive { grid-area: archive; }
+.town-compass { grid-area: compass; }
+.town-building {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-subtle);
+  border-radius: 10px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.town-building h3 { margin: 0; font-size: 0.95rem; }
+.town-building-body p { margin: 0; }
+.town-art { width: 100%; max-height: 90px; fill: rgba(245, 197, 66, 0.12); stroke: var(--border-hover); stroke-width: 1.5; stroke-dasharray: 4 3; }
+.town-building[data-status='WORKING'] { border-color: var(--gold-primary); }
+.town-building[data-status='UNKNOWN'] { border-style: dashed; }
+.town-character { display: flex; align-items: center; gap: 10px; }
+.town-character small, .town-card small { display: block; opacity: 0.8; }
+.town-avatar {
+  width: 44px; height: 44px; border-radius: 50%;
+  display: grid; place-items: center; font-size: 1.3rem;
+  border: 2px solid var(--border-hover);
+}
+.town-status-UNKNOWN .town-avatar { border-style: dashed; opacity: 0.7; }
+.town-status-WORKING .town-avatar { border-color: var(--gold-primary); animation: town-pulse 1.6s ease-in-out infinite; }
+.town-status-FAILED .town-avatar { border-color: #e5484d; }
+.town-status-COMPLETED .town-avatar { border-color: #46a758; }
+.town-status-chip { align-self: flex-start; font-size: 0.8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-subtle); }
+.town-badge { font-size: 0.7rem; margin-left: 4px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-hover); }
+.town-board-title { margin: 8px 0 0; font-size: 1.05rem; }
+.town-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: start; }
+.town-column { background: var(--bg-panel); border: 1px solid var(--border-subtle); border-radius: 10px; padding: 10px; }
+.town-column h3 { margin: 0 0 6px; font-size: 0.9rem; }
+.town-cards { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.town-card { border: 1px solid var(--border-subtle); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 2px; }
+@keyframes town-pulse { 0%, 100% { box-shadow: 0 0 0 0 var(--gold-glow); } 50% { box-shadow: 0 0 0 8px transparent; } }
+@media (prefers-reduced-motion: reduce) { .town-status-WORKING .town-avatar { animation: none; } }
+@media (max-width: 1100px) { .town-board { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 760px) {
+  .town-map { grid-template-columns: 1fr; grid-template-areas: "gate" "hall" "review" "archive" "compass"; }
+  .town-board { grid-template-columns: 1fr; }
+}
