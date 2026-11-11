@@ -62,6 +62,8 @@ export interface TownCopy {
   readonly colOwner: string; readonly colUnverified: string; readonly empty: string;
   readonly ownerUnsupported: string; readonly unverifiedHint: string;
   readonly resting: string; readonly previously: string;
+  readonly activeAi: string; readonly aiUnknown: string; readonly aiVisibilityNote: string;
+  readonly aiCalls: (n: number) => string; readonly byAi: string;
 }
 
 const TH: TownCopy = {
@@ -82,6 +84,9 @@ const TH: TownCopy = {
   ownerUnsupported: 'ยังไม่รองรับ: แอปยังไม่ส่งรายการรออนุมัติมาให้หน้านี้ จึงไม่แสดงตัวเลขเพื่อไม่ให้เข้าใจผิดว่า "ไม่มี"',
   unverifiedHint: 'เสร็จหรือกำลังทำ แต่ยังพิสูจน์ไม่ได้ จึงไม่นับเป็นสำเร็จ',
   resting: 'พัก', previously: 'รายงานก่อนหน้า',
+  activeAi: 'AI ที่กำลังใช้งานผ่าน lnwjud', aiUnknown: 'ไม่ทราบชื่อ AI',
+  aiVisibilityNote: 'เห็นเฉพาะ AI ที่ทำงานผ่าน lnwjud เท่านั้น AI ที่ไม่ได้ผ่านที่นี่จะไม่ปรากฏ (ไม่ได้แปลว่าว่าง)',
+  aiCalls: (n) => `${n} งาน`, byAi: 'โดย',
 };
 
 const EN: TownCopy = {
@@ -101,6 +106,9 @@ const EN: TownCopy = {
   ownerUnsupported: 'Not supported yet: the app does not send the approval queue to this page, so no number is shown rather than a misleading "none".',
   unverifiedHint: 'Finished or running but not provable, so not counted as done.',
   resting: 'Resting', previously: 'Previously reported',
+  activeAi: 'AIs working through lnwjud', aiUnknown: 'AI name unknown',
+  aiVisibilityNote: 'Only AIs working through lnwjud are visible. An AI that does not go through here will not appear (that does not mean it is idle).',
+  aiCalls: (n) => `${n} call(s)`, byAi: 'by',
 };
 
 const COPY: Readonly<Record<UiLocale, TownCopy>> = { th: TH, en: EN };

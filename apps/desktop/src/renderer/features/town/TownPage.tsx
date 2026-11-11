@@ -4,7 +4,7 @@ import { PageHeading, StatusMessage, EmptyState } from '../ui/UiPrimitives.js';
 import { formatDateTime } from '../../date-time.js';
 import { buildTownSnapshot } from './town-adapter.js';
 import { deriveBuildingFacts } from './town-buildings.js';
-import { deriveTown, type TownBoardCard, type TownStatus, type TownStatusResult } from './town-state.js';
+import { deriveTown, type TownActiveClient, type TownBoardCard, type TownStatus, type TownStatusResult } from './town-state.js';
 import { reasonLabel, statusLabel, townCopy, type TownCopy } from './town-copy.js';
 import {
   TOWN_GOAL_CHECKPOINT_MAX_AGE_MS,
@@ -68,6 +68,7 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
             </Building>
             <Building className="town-compass" title={copy.compass} art="house" status={model.town.agent.status}>
               <Character name="PN-01" result={model.town.agent} locale={locale} resting={copy.resting} previously={copy.previously} />
+              <ActiveClients clients={model.town.activeClients} copy={copy} />
             </Building>
             <Building className="town-review" title={copy.review} art="review">
               <p>{model.facts.review === null
@@ -86,7 +87,7 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
 
           <h2 className="town-board-title">{copy.board}</h2>
           <div className="town-board">
-            <Column title={copy.colWorking} cards={model.town.board.working} locale={locale} empty={copy.empty} />
+            <Column title={copy.colWorking} cards={model.town.board.working} locale={locale} empty={copy.empty} byAi={copy.byAi} unknownAi={copy.aiUnknown} />
             <Column title={copy.colDone} cards={model.town.board.done} locale={locale} empty={copy.empty} />
             <Column title={copy.colStuck} cards={model.town.board.stuck} locale={locale} empty={copy.empty} />
             <section className="town-column town-column-owner" aria-label={copy.colOwner}>
@@ -149,15 +150,33 @@ function Character(props: {
   );
 }
 
+function ActiveClients({ clients, copy }: { readonly clients: readonly TownActiveClient[]; readonly copy: TownCopy }): ReactElement | null {
+  if (clients.length === 0) return null;
+  return (
+    <div className="town-ai-list">
+      <strong>{copy.activeAi}</strong>
+      <ul>
+        {clients.map((client) => (
+          <li key={client.name ?? '__unknown__'} data-known={client.name === null ? 'false' : 'true'}>
+            {client.name ?? copy.aiUnknown} · {copy.aiCalls(client.calls)}
+          </li>
+        ))}
+      </ul>
+      <small>{copy.aiVisibilityNote}</small>
+    </div>
+  );
+}
+
 function Column(props: {
   readonly title: string; readonly hint?: string;
   readonly cards: readonly TownBoardCard[]; readonly locale: UiLocale; readonly empty: string;
+  readonly byAi?: string; readonly unknownAi?: string;
 }): ReactElement {
   return (
     <section className="town-column" aria-label={props.title}>
       <h3>{props.title}</h3>
       {props.hint === undefined ? null : <p className="hint">{props.hint}</p>}
-      <Cards cards={props.cards} locale={props.locale} empty={props.empty} />
+      <Cards cards={props.cards} locale={props.locale} empty={props.empty} byAi={props.byAi} unknownAi={props.unknownAi} />
     </section>
   );
 }
@@ -168,7 +187,10 @@ function cardDetail(detail: string | null, locale: UiLocale): string | null {
   return detail !== null && ISO_TIME.test(detail) ? formatDateTime(detail, '—', locale) : detail;
 }
 
-function Cards(props: { readonly cards: readonly TownBoardCard[]; readonly locale: UiLocale; readonly empty: string }): ReactElement {
+function Cards(props: {
+  readonly cards: readonly TownBoardCard[]; readonly locale: UiLocale; readonly empty: string;
+  readonly byAi?: string | undefined; readonly unknownAi?: string | undefined;
+}): ReactElement {
   if (props.cards.length === 0) return <p className="hint">{props.empty}</p>;
   return (
     <ul className="town-cards">
@@ -176,6 +198,8 @@ function Cards(props: { readonly cards: readonly TownBoardCard[]; readonly local
         <li key={card.id} className={`town-card town-status-${card.status}`}>
           <strong>{card.title}</strong>
           <span className="town-status-chip">{statusLabel(props.locale, card.status)}</span>
+          {card.clientName === undefined || props.byAi === undefined ? null
+            : <small className="town-card-ai">{props.byAi}: {card.clientName ?? props.unknownAi}</small>}
           {card.detail === null ? null : <small>{cardDetail(card.detail, props.locale)}</small>}
           <small>{reasonLabel(props.locale, card.reason)}</small>
         </li>

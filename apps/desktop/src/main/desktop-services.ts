@@ -2936,7 +2936,7 @@ async function listVisibleAuditEvents(
 }
 
 function toInFlightItem(
-  entry: { callId: string; toolName: string; startedAt: string; targetSummary?: string; targetDetail: InFlightWorkItem['targetDetail']; workspaceId?: string; sessionId?: string },
+  entry: { callId: string; toolName: string; startedAt: string; targetSummary?: string; targetDetail: InFlightWorkItem['targetDetail']; workspaceId?: string; sessionId?: string; clientName?: string },
   logSessionId?: string,
 ): InFlightWorkItem {
   return {
@@ -2947,6 +2947,7 @@ function toInFlightItem(
     targetDetail: entry.targetDetail,
     workspaceId: entry.workspaceId ?? null,
     sessionId: logSessionId ?? entry.sessionId ?? null,
+    clientName: entry.clientName ?? null,
   };
 }
 

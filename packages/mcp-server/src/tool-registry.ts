@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import {
   appError,
   err,
@@ -250,6 +251,8 @@ export class ToolRegistry {
   private readonly processTargets = new Map<string, string>();
   private readonly codexTaskTargets = new Map<string, string>();
   private readonly maxToolDurationMs: number | null;
+  /** Async-local attribution keeps simultaneous MCP requests isolated, including tool_batch children. */
+  private readonly invocationTraceContext = new AsyncLocalStorage<TraceContext>();
 
   public constructor(services: McpApplicationServices, actor: FileActor, options: ToolRegistryOptions = {}) {
     this.services = services;
@@ -410,7 +413,9 @@ export class ToolRegistry {
   }
 
   public invoke(name: string, input: unknown, traceContext?: TraceContext, parentSignal?: AbortSignal): Promise<McpToolResponse> {
-    return this.invokeInternal(name, input, traceContext, parentSignal);
+    // Nested registry calls inherit only their own request's client-supplied trace, never a global label.
+    const resolvedTraceContext = traceContext ?? this.invocationTraceContext.getStore();
+    return this.invocationTraceContext.run(resolvedTraceContext ?? {}, () => this.invokeInternal(name, input, resolvedTraceContext, parentSignal));
   }
 
   /** Internal-only deterministic shell entrypoint; the reserved context never enters the public schema. */

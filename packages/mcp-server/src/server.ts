@@ -2,7 +2,7 @@ import { McpServer, type CallToolResult, type RegisteredTool } from '@modelconte
 import type { DiagnosticLogger, FileActor } from '@lnwjud/application';
 import type { PermissionProfile } from '@lnwjud/permissions';
 import { APP_NAME, APP_VERSION, DEFAULT_PONYTAIL_MODE, parsePonytailMode, type DestructiveAutoApprovalPolicy, type PonytailMode, type ToolAvailabilitySnapshot } from '@lnwjud/shared';
-import { readTraceContext, type ActivitySink, type ActivityTracker } from './activity-tracker.js';
+import { boundedClientName, readTraceContext, type ActivitySink, type ActivityTracker } from './activity-tracker.js';
 import { withProgressHeartbeat, type ProgressNotifyContext } from './progress-heartbeat.js';
 import { IncrementalVerifier } from './incremental-verifier.js';
 import { ContextEconomyRuntime } from './context-economy.js';
@@ -157,9 +157,11 @@ export function createMcpServer(options: McpServerOptions): McpServer {
       runBudgetGuard.begin(dispatchContext);
       const sdkTrace = readTraceContext(context);
       const requestScope = options.requestScope;
+      const clientName = boundedClientName(server.server.getClientVersion()?.name);
       const traceContext = {
         ...sdkTrace,
         ...(requestScope?.sessionId === undefined ? {} : { sessionId: requestScope.sessionId }),
+        ...(clientName === undefined ? {} : { clientName }),
         ...(sdkTrace.traceId !== undefined || requestScope?.traceId === undefined ? {} : { traceId: requestScope.traceId }),
         ...(sdkTrace.traceParent !== undefined || requestScope?.traceParent === undefined ? {} : { traceParent: requestScope.traceParent }),
         ...(sdkTrace.traceState !== undefined || requestScope?.traceState === undefined ? {} : { traceState: requestScope.traceState }),

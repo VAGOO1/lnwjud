@@ -481,6 +481,8 @@ export interface InFlightWorkItem {
   readonly targetDetail: ActivityTargetReference;
   readonly workspaceId: string | null;
   readonly sessionId: string | null;
+  /** Display-only name the connected AI client gave at connect time; absent/null when unknown. */
+  readonly clientName?: string | null;
 }
 
 export interface ConnectionModes {

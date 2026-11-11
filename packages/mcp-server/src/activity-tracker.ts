@@ -32,6 +32,8 @@ export interface ActivitySinkEvent {
 
 export interface TraceContext {
   readonly sessionId?: string;
+  /** Display-only label of the connected MCP client (from `initialize`). Never used for authorization. */
+  readonly clientName?: string;
   readonly traceId?: string;
   readonly traceParent?: string;
   readonly traceState?: string;
@@ -85,6 +87,8 @@ export interface InFlightToolCall {
   readonly goalId?: string;
   readonly workspaceId?: string;
   readonly sessionId?: string;
+  /** Display-only; deliberately not copied into audit/sink events. */
+  readonly clientName?: string;
   readonly targetSummary?: string;
   readonly targetDetail: ActivityTargetReference;
   readonly traceId?: string;
@@ -92,6 +96,17 @@ export interface InFlightToolCall {
   readonly traceState?: string;
   readonly baggage?: string;
   readonly authorizationMode?: 'standard' | 'full_bypass';
+}
+
+export const CLIENT_NAME_MAX_LENGTH = 60;
+
+/** Bound and clean a client-supplied label so it is safe to show in the UI. */
+export function boundedClientName(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  // eslint-disable-next-line no-control-regex
+  const cleaned = value.replace(/[\u0000-\u001f\u007f]+/gu, ' ').replace(/\s+/gu, ' ').trim();
+  if (cleaned.length === 0) return undefined;
+  return cleaned.length > CLIENT_NAME_MAX_LENGTH ? `${cleaned.slice(0, CLIENT_NAME_MAX_LENGTH - 1)}…` : cleaned;
 }
 
 export class ActivityTracker {
@@ -194,12 +209,14 @@ export class ActivityTracker {
     const targetSummary = describedTarget.summary;
     const targetDetail = activityTargetReference(callId, describedTarget.detail, targetSummary);
     const trace = traceContext ?? readTraceContext(input);
+    const clientName = boundedClientName(trace.clientName);
     const entry: InFlightToolCall = {
       callId,
       toolName,
       startedAt: timestamp,
       ...(workspaceId === undefined ? {} : { workspaceId }),
       ...(trace.sessionId === undefined ? {} : { sessionId: trace.sessionId }),
+      ...(clientName === undefined ? {} : { clientName }),
       ...(targetSummary === undefined ? {} : { targetSummary }),
       targetDetail,
       ...(trace.traceId === undefined ? {} : { traceId: trace.traceId }),

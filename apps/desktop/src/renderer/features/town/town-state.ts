@@ -77,6 +77,8 @@ export interface TownInFlightCall {
   readonly callId: string;
   readonly toolName: string;
   readonly startedAt: string;
+  /** Name the connected AI gave at connect time; null when it never said (shown as unknown, never guessed). */
+  readonly clientName: string | null;
 }
 
 export interface TownAgentEvidence {
@@ -181,6 +183,13 @@ export interface TownBoardCard {
   readonly status: TownStatus;
   readonly reason: TownReason;
   readonly detail: string | null;
+  /** Which AI made this call; only set on running-call cards. null = unknown. */
+  readonly clientName?: string | null;
+}
+
+export interface TownActiveClient {
+  readonly name: string | null;
+  readonly calls: number;
 }
 
 export interface TownMissionBoard {
@@ -198,6 +207,12 @@ export interface TownResult {
   readonly agent: TownStatusResult;
   readonly goals: readonly TownGoalResult[];
   readonly board: TownMissionBoard;
+  /**
+   * AIs with a call running through lnwjud right now. Empty unless the agent is
+   * verified WORKING. A null name means "connected but did not identify itself".
+   * AIs that do not pass through lnwjud are invisible here, not "idle".
+   */
+  readonly activeClients: readonly TownActiveClient[];
 }
 
 // ------------------------------------------------------------------- the gate
@@ -389,7 +404,7 @@ function deriveBoard(snapshot: TownSnapshot, policy: TownPolicy, goals: readonly
   for (const call of snapshot.agent?.inFlight ?? []) {
     // Individual running calls are evidence of work; they are not goals.
     if (snapshot.agent !== null && snapshot.agent.mcpRunning && snapshot.agent.agentState === 'busy') {
-      working.push({ id: call.callId, title: call.toolName, status: 'WORKING', reason: 'running_call_evidence', detail: call.startedAt });
+      working.push({ id: call.callId, title: call.toolName, status: 'WORKING', reason: 'running_call_evidence', detail: call.startedAt, clientName: call.clientName });
     }
   }
   return { trust: 'current', working, done, stuck, unverified, awaitingOwner: { supported: snapshot.ownerAction.state !== 'unsupported', cards: awaiting } };
@@ -399,12 +414,22 @@ function deriveBoard(snapshot: TownSnapshot, policy: TownPolicy, goals: readonly
 
 export function deriveTown(snapshot: TownSnapshot, policy: TownPolicy): TownResult {
   const goals = snapshot.goals.map((goal) => goalResult(goal, snapshot, policy));
+  const agent = deriveAgentStatus(snapshot, policy);
   return {
     environment: snapshot.environment,
-    agent: deriveAgentStatus(snapshot, policy),
+    agent,
     goals,
     board: deriveBoard(snapshot, policy, goals),
+    activeClients: agent.status === 'WORKING' ? countActiveClients(snapshot.agent?.inFlight ?? []) : [],
   };
+}
+
+function countActiveClients(calls: readonly TownInFlightCall[]): readonly TownActiveClient[] {
+  const counts = new Map<string | null, number>();
+  for (const call of calls) counts.set(call.clientName, (counts.get(call.clientName) ?? 0) + 1);
+  return [...counts.entries()]
+    .map(([name, count]) => ({ name, calls: count }))
+    .sort((a, b) => b.calls - a.calls || (a.name ?? '\uffff').localeCompare(b.name ?? '\uffff'));
 }
 
 // ---------------------------------------------------------- one-shot events
