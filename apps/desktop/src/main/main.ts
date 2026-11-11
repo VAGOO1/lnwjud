@@ -130,7 +130,7 @@ import { configureNativeCrashDiagnostics, pruneNativeCrashDumpsForDataPath } fro
 import { RuntimeDiagnosticsHistoryRecorder, type RuntimeDiagnosticsSample } from './runtime-diagnostics-history.js';
 import { FACTORY_RESET_APPLY_ARG, applyPendingFactoryResetSync, clearFactoryResetBootstrapSync, clearFactoryResetStageSync, factoryResetBootstrapUserDataPath, stageFactoryResetSync } from './factory-reset.js';
 import { decryptV3WindowsSafeStorageSecretIfPresent } from './checkpoint-key-compat.js';
-import { mutationApprovalDialogOptions } from './mutation-approval.js';
+import { mutationApprovalDialogOptions, createApprovalWaitingCounter } from './mutation-approval.js';
 import { prependBundledRuntimeToolsToPath } from './runtime-tools.js';
 import { parseWorkflowWorkspace, parseWorkflowPrepare, parseCallHistory, parseDoctorGoalsRequest, parseWorkflowGoal, parseResourceSnapshot, parseRestoreTaskCheckpoint, parseCancelOwnedGoalTask } from './workflow-ipc-parser.js';
 import { COPY_COMMANDS, OFFICIAL_URL_TARGETS } from './tool-catalog/remediation-registry.js';
@@ -914,6 +914,11 @@ export function registerIpcHandlers(
     assertNoPayload(payload);
     return installActivity.snapshot();
   });
+  registerHandler(ipcChannels.getPendingApprovalCount, async (event, payload: unknown) => {
+    assertTrustedSender(event, getMainWindow());
+    assertNoPayload(payload);
+    return { pending: mutationApprovalsWaiting.count };
+  });
   registerHandler(ipcChannels.getMutationApprovalPrompt, (event, payload: unknown) => {
     if (!isTrustedIpcSender(event, getMainWindow())) throw new Error('IPC sender rejected');
     assertNoPayload(payload);
@@ -1583,6 +1588,7 @@ interface PendingMutationApproval {
 }
 const pendingMutationApprovals = new Map<number, PendingMutationApproval>();
 let mutationApprovalQueue: Promise<void> = Promise.resolve();
+const mutationApprovalsWaiting = createApprovalWaitingCounter();
 let desktopRuntime: DesktopRuntime | null = null;
 let tray: Tray | null = null;
 let desktopLocale: UiLocale = 'th';
@@ -1630,7 +1636,7 @@ let currentUpdateStatus: UpdateStatus = {
 function requestMutationApproval(request: HostMutationApprovalRequest): Promise<boolean> {
   const queued = mutationApprovalQueue.then(() => showMutationApprovalPrompt(request));
   mutationApprovalQueue = queued.then(() => undefined, () => undefined);
-  return queued;
+  return mutationApprovalsWaiting.track(queued);
 }
 
 function showMutationApprovalPrompt(request: HostMutationApprovalRequest): Promise<boolean> {

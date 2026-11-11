@@ -40,7 +40,7 @@ function input(overrides: Partial<TownAdapterInput> = {}): TownAdapterInput {
     fetchFailed: false,
     dashboard: { mcp: { running: true, url: null, workspaceId: 'ws-1' }, agentState: 'idle', inFlight: [] },
     goalOptions: [{ goalId: 'goal-1', goalKey: 'repair-import' }],
-    taskResults: [],
+    taskResults: [], pendingApprovals: 0,
     ...overrides,
   };
 }

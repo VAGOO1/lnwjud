@@ -92,8 +92,9 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
             <Building className="town-peak" title={copy.peak} art="peak">
               <p>{model.facts.peak === null ? copy.unknownFact : copy.peakFacts(model.facts.peak.running)}</p>
             </Building>
-            <Building className="town-approval" title={copy.approvalGate} art="gate" muted>
-              <p className="hint">{copy.notSupported}</p>
+            <Building className="town-approval" title={copy.approvalGate} art="gate">
+              <p>{model.facts.approval === null ? copy.unknownFact : copy.approvalFacts(model.facts.approval.pending)}</p>
+              <small className="hint">{copy.approvalHint}</small>
             </Building>
             <Building className="town-messenger" title={copy.messenger} art="house" muted>
               <p className="hint">{copy.notSupported}</p>
@@ -113,9 +114,8 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
             <Column title={copy.colStuck} cards={model.town.board.stuck} locale={locale} empty={copy.empty} />
             <section className="town-column town-column-owner" aria-label={copy.colOwner}>
               <h3>{copy.colOwner}</h3>
-              {model.town.board.awaitingOwner.supported
-                ? <Cards cards={model.town.board.awaitingOwner.cards} locale={locale} empty={copy.empty} />
-                : <p className="hint">{copy.ownerUnsupported}</p>}
+              <p>{model.facts.approval === null ? copy.unknownFact : copy.approvalFacts(model.facts.approval.pending)}</p>
+              <p className="hint">{copy.approvalHint}</p>
             </section>
             <Column title={copy.colUnverified} hint={copy.unverifiedHint} cards={model.town.board.unverified} locale={locale} empty={copy.empty} />
           </div>

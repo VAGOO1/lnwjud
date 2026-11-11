@@ -220,6 +220,9 @@ describe('production desktop IPC acceptance', () => {
       canInstall: false,
     });
     await expect(requiredHandler(ipcChannels.getInstallActivity)(trusted)).resolves.toEqual({ operations: [] });
+    await expect(requiredHandler(ipcChannels.getPendingApprovalCount)(trusted)).resolves.toEqual({ pending: 0 });
+    await expect(requiredHandler(ipcChannels.getPendingApprovalCount)(trusted, { pending: 9 })).rejects.toThrow();
+    await expect(requiredHandler(ipcChannels.getPendingApprovalCount)({ senderFrame: { url: 'https://evil.example/' } })).rejects.toThrow('IPC sender rejected');
     await expect(requiredHandler(ipcChannels.checkForUpdates)(trusted)).resolves.toMatchObject({ phase: 'unavailable' });
     await expect(requiredHandler(ipcChannels.installUpdate)(trusted)).resolves.toMatchObject({
       accepted: false,

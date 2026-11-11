@@ -22,13 +22,15 @@ export interface TownBuildingFacts {
   readonly peak: { readonly running: number } | null;
   /** Central Plaza: all calls running right now and how many distinct AI names sit behind them. */
   readonly plaza: { readonly runningCalls: number; readonly aiCount: number } | null;
+  /** Approval Gate: owner approvals waiting in the whole app (count only, never the request). */
+  readonly approval: { readonly pending: number } | null;
 }
 
 /** Conservative on purpose: a tool that does not match is simply not counted, never mis-counted. */
 const FORGE_TOOL = /^codex_/u;
 const PEAK_TOOL = /^(?:search_|symbol_|find_)/u;
 
-const UNKNOWN_FACTS: TownBuildingFacts = { gate: { mcpRunning: null }, hall: null, review: null, archive: null, forge: null, peak: null, plaza: null };
+const UNKNOWN_FACTS: TownBuildingFacts = { gate: { mcpRunning: null }, hall: null, review: null, archive: null, forge: null, peak: null, plaza: null, approval: null };
 
 export function deriveBuildingFacts(input: TownAdapterInput, board: TownMissionBoard): TownBuildingFacts {
   if (board.trust !== 'current') return UNKNOWN_FACTS;
@@ -56,6 +58,7 @@ export function deriveBuildingFacts(input: TownAdapterInput, board: TownMissionB
   const inFlight = input.dashboard?.inFlight ?? [];
   const codex = input.dashboard?.codex ?? null;
   return {
+    approval: input.pendingApprovals === null ? null : { pending: input.pendingApprovals },
     forge: codex === null ? null : {
       installed: codex.installed, version: codex.version,
       running: inFlight.filter((call) => FORGE_TOOL.test(call.toolName)).length,

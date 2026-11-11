@@ -51,6 +51,7 @@ import {
   type IncidentExportResult,
   type InFlightWorkItem,
   type InstallActivitySnapshot,
+  type PendingApprovalCount,
   type LnwjudApi,
   type LoadLogSessionHistoryRequest,
   type LoadLogSessionHistoryResult,
@@ -830,6 +831,11 @@ function updateStatus(value: unknown): UpdateStatus {
     message: nullableString(value.message),
     canInstall: booleanField(value, 'canInstall'),
   };
+}
+
+function pendingApprovalCount(value: unknown): PendingApprovalCount {
+  if (!isRecord(value) || !Number.isSafeInteger(value.pending) || (value.pending as number) < 0) throw new Error('Invalid IPC response');
+  return { pending: value.pending as number };
 }
 
 function installActivitySnapshot(value: unknown): InstallActivitySnapshot {
@@ -1765,6 +1771,7 @@ const api: LnwjudApi = {
   getUpdateStatus: () => invoke(ipcChannels.getUpdateStatus).then(updateStatus),
   getInstallActivity: () => invoke(ipcChannels.getInstallActivity).then(installActivitySnapshot),
   getMutationApprovalPrompt: () => invoke(ipcChannels.getMutationApprovalPrompt).then(mutationApprovalPrompt),
+  getPendingApprovalCount: () => invoke(ipcChannels.getPendingApprovalCount).then(pendingApprovalCount),
   resolveMutationApprovalPrompt: (request: ResolveMutationApprovalPromptRequest) =>
     invoke(ipcChannels.resolveMutationApprovalPrompt, request).then((value: unknown) => {
       if (!isRecord(value)) throw new Error('Invalid IPC response');

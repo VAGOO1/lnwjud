@@ -91,3 +91,29 @@ function detectTrustedHostWindowAvailable(): boolean {
     return false;
   }
 }
+
+/**
+ * Counts owner-approval requests that are queued or on screen and not yet answered.
+ * Display-only: it exposes a number, never the request, and cannot approve anything.
+ */
+export interface ApprovalWaitingCounter {
+  readonly count: number;
+  track<T>(work: Promise<T>): Promise<T>;
+}
+
+export function createApprovalWaitingCounter(): ApprovalWaitingCounter {
+  let waiting = 0;
+  return {
+    get count(): number { return waiting; },
+    track<T>(work: Promise<T>): Promise<T> {
+      waiting += 1;
+      let released = false;
+      const release = (): void => {
+        if (released) return;
+        released = true;
+        waiting = Math.max(0, waiting - 1);
+      };
+      return work.finally(release);
+    },
+  };
+}

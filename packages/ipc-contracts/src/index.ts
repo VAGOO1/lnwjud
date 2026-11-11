@@ -95,6 +95,7 @@ export const ipcChannels = {
   getUpdateStatus: 'lnwjud:get-update-status',
   getInstallActivity: 'lnwjud:get-install-activity',
   getMutationApprovalPrompt: 'lnwjud:get-mutation-approval-prompt',
+  getPendingApprovalCount: 'lnwjud:get-pending-approval-count',
   resolveMutationApprovalPrompt: 'lnwjud:resolve-mutation-approval-prompt',
   factoryReset: 'lnwjud:factory-reset',
   checkForUpdates: 'lnwjud:check-for-updates',
@@ -1164,6 +1165,11 @@ export interface PdfProviderInstallResult {
   readonly restartRequired: boolean;
 }
 
+/** Read-only count of owner approvals waiting in the desktop app. Carries no request content. */
+export interface PendingApprovalCount {
+  readonly pending: number;
+}
+
 export interface MutationApprovalPrompt {
   readonly title: string;
   readonly message: string;
@@ -1255,6 +1261,7 @@ export interface IpcRequestMap {
   readonly [ipcChannels.getUpdateStatus]: undefined;
   readonly [ipcChannels.getInstallActivity]: undefined;
   readonly [ipcChannels.getMutationApprovalPrompt]: undefined;
+  readonly [ipcChannels.getPendingApprovalCount]: undefined;
   readonly [ipcChannels.resolveMutationApprovalPrompt]: ResolveMutationApprovalPromptRequest;
   readonly [ipcChannels.factoryReset]: undefined;
   readonly [ipcChannels.checkForUpdates]: undefined;
@@ -1344,6 +1351,7 @@ export interface IpcResponseMap {
   readonly [ipcChannels.getUpdateStatus]: UpdateStatus;
   readonly [ipcChannels.getInstallActivity]: InstallActivitySnapshot;
   readonly [ipcChannels.getMutationApprovalPrompt]: MutationApprovalPrompt | null;
+  readonly [ipcChannels.getPendingApprovalCount]: PendingApprovalCount;
   readonly [ipcChannels.resolveMutationApprovalPrompt]: { readonly accepted: boolean };
   readonly [ipcChannels.factoryReset]: { readonly accepted: boolean };
   readonly [ipcChannels.checkForUpdates]: UpdateStatus;
@@ -1433,6 +1441,7 @@ export interface LnwjudApi {
   getUpdateStatus(): Promise<IpcResponseMap[typeof ipcChannels.getUpdateStatus]>;
   getInstallActivity(): Promise<IpcResponseMap[typeof ipcChannels.getInstallActivity]>;
   getMutationApprovalPrompt(): Promise<IpcResponseMap[typeof ipcChannels.getMutationApprovalPrompt]>;
+  getPendingApprovalCount(): Promise<IpcResponseMap[typeof ipcChannels.getPendingApprovalCount]>;
   resolveMutationApprovalPrompt(request: ResolveMutationApprovalPromptRequest): Promise<IpcResponseMap[typeof ipcChannels.resolveMutationApprovalPrompt]>;
   factoryReset(): Promise<IpcResponseMap[typeof ipcChannels.factoryReset]>;
   checkForUpdates(): Promise<IpcResponseMap[typeof ipcChannels.checkForUpdates]>;

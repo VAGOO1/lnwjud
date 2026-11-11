@@ -41,6 +41,8 @@ export interface TownAdapterInput {
   } | null;
   readonly goalOptions: readonly Pick<DoctorGoalOption, 'goalId' | 'goalKey'>[];
   readonly taskResults: readonly TownTaskResultInput[];
+  /** Owner approvals waiting app-wide (count only); null when the read failed or is unavailable. */
+  readonly pendingApprovals: number | null;
 }
 
 export const TOWN_TITLE_MAX = 60;
