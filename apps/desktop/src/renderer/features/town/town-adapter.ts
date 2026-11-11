@@ -36,7 +36,7 @@ export interface TownAdapterInput {
   readonly observedAt: string | null;
   /** True if the latest read of any source failed. */
   readonly fetchFailed: boolean;
-  readonly dashboard: Pick<DashboardSnapshot, 'mcp' | 'agentState'> & {
+  readonly dashboard: Pick<DashboardSnapshot, 'mcp' | 'agentState' | 'codex'> & {
     readonly inFlight: readonly Pick<DashboardSnapshot['inFlight'][number], 'callId' | 'toolName' | 'startedAt' | 'clientName'>[];
   } | null;
   readonly goalOptions: readonly Pick<DoctorGoalOption, 'goalId' | 'goalKey'>[];
