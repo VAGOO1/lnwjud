@@ -162,6 +162,12 @@ function Column(props: {
   );
 }
 
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/u;
+
+function cardDetail(detail: string | null, locale: UiLocale): string | null {
+  return detail !== null && ISO_TIME.test(detail) ? formatDateTime(detail, '—', locale) : detail;
+}
+
 function Cards(props: { readonly cards: readonly TownBoardCard[]; readonly locale: UiLocale; readonly empty: string }): ReactElement {
   if (props.cards.length === 0) return <p className="hint">{props.empty}</p>;
   return (
@@ -170,7 +176,7 @@ function Cards(props: { readonly cards: readonly TownBoardCard[]; readonly local
         <li key={card.id} className={`town-card town-status-${card.status}`}>
           <strong>{card.title}</strong>
           <span className="town-status-chip">{statusLabel(props.locale, card.status)}</span>
-          {card.detail === null ? null : <small>{card.detail}</small>}
+          {card.detail === null ? null : <small>{cardDetail(card.detail, props.locale)}</small>}
           <small>{reasonLabel(props.locale, card.reason)}</small>
         </li>
       ))}

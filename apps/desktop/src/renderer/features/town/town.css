@@ -36,7 +36,7 @@
 .town-status-WORKING .town-avatar { border-color: var(--gold-primary); animation: town-pulse 1.6s ease-in-out infinite; }
 .town-status-FAILED .town-avatar { border-color: #e5484d; }
 .town-status-COMPLETED .town-avatar { border-color: #46a758; }
-.town-status-chip { font-size: 0.8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-subtle); }
+.town-status-chip { align-self: flex-start; font-size: 0.8rem; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--border-subtle); }
 .town-badge { font-size: 0.7rem; margin-left: 4px; padding: 1px 6px; border-radius: 4px; border: 1px solid var(--border-hover); }
 .town-board-title { margin: 8px 0 0; font-size: 1.05rem; }
 .town-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; align-items: start; }
