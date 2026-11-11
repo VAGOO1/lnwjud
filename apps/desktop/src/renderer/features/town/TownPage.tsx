@@ -83,6 +83,27 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
               {model.facts.archive?.latestCheckpointAt
                 ? <small>{formatDateTime(model.facts.archive.latestCheckpointAt, '—', locale)}</small> : null}
             </Building>
+            <Building className="town-plaza" title={copy.plaza} art="plaza">
+              <p>{model.facts.plaza === null ? copy.unknownFact : copy.plazaFacts(model.facts.plaza.runningCalls, model.facts.plaza.aiCount)}</p>
+            </Building>
+            <Building className="town-forge" title={copy.forge} art="forge">
+              <p>{model.facts.forge === null ? copy.unknownFact : copy.forgeFacts(model.facts.forge.installed, model.facts.forge.version, model.facts.forge.running)}</p>
+            </Building>
+            <Building className="town-peak" title={copy.peak} art="peak">
+              <p>{model.facts.peak === null ? copy.unknownFact : copy.peakFacts(model.facts.peak.running)}</p>
+            </Building>
+            <Building className="town-approval" title={copy.approvalGate} art="gate" muted>
+              <p className="hint">{copy.notSupported}</p>
+            </Building>
+            <Building className="town-messenger" title={copy.messenger} art="house" muted>
+              <p className="hint">{copy.notSupported}</p>
+            </Building>
+            <Building className="town-cat" title={copy.catStudio} art="hall" muted>
+              <p className="hint">{copy.demoOnly}</p>
+            </Building>
+            <Building className="town-yard" title={copy.trainingYard} art="archive" muted>
+              <p className="hint">{copy.demoOnly}</p>
+            </Building>
           </div>
 
           <h2 className="town-board-title">{copy.board}</h2>
@@ -112,12 +133,13 @@ function gateText(copy: TownCopy, running: boolean | null): string {
 function Building(props: {
   readonly className: string;
   readonly title: string;
-  readonly art: 'gate' | 'hall' | 'house' | 'review' | 'archive';
+  readonly art: ArtKind;
   readonly status?: TownStatus;
+  readonly muted?: boolean;
   readonly children: ReactNode;
 }): ReactElement {
   return (
-    <article className={`town-building ${props.className}`} data-status={props.status ?? 'NONE'}>
+    <article className={`town-building ${props.className}`} data-status={props.status ?? 'NONE'} data-muted={props.muted === true ? 'true' : 'false'}>
       <PlaceholderArt kind={props.art} />
       <h3>{props.title}</h3>
       <div className="town-building-body">{props.children}</div>
@@ -208,14 +230,19 @@ function Cards(props: {
   );
 }
 
+type ArtKind = 'gate' | 'hall' | 'house' | 'review' | 'archive' | 'plaza' | 'forge' | 'peak';
+
 /** Simple geometric stand-ins; the real anime art is still under owner review. */
-function PlaceholderArt({ kind }: { readonly kind: 'gate' | 'hall' | 'house' | 'review' | 'archive' }): ReactElement {
+function PlaceholderArt({ kind }: { readonly kind: ArtKind }): ReactElement {
   return (
     <svg className="town-art" viewBox="0 0 120 70" role="img" aria-hidden="true" focusable="false">
       {kind === 'gate' ? <><rect x="15" y="20" width="20" height="45" /><rect x="85" y="20" width="20" height="45" /><path d="M10 22h100v10H10z" /></> : null}
       {kind === 'hall' ? <><rect x="15" y="25" width="90" height="40" /><path d="M10 27 60 6l50 21z" /><rect x="52" y="42" width="16" height="23" /></> : null}
       {kind === 'house' ? <><rect x="30" y="30" width="60" height="35" /><path d="M24 32 60 10l36 22z" /><rect x="54" y="44" width="12" height="21" /></> : null}
       {kind === 'review' ? <><rect x="20" y="22" width="80" height="43" /><circle cx="60" cy="40" r="12" /></> : null}
+      {kind === 'plaza' ? <><circle cx="60" cy="40" r="26" /><circle cx="60" cy="40" r="8" /></> : null}
+      {kind === 'forge' ? <><rect x="20" y="35" width="80" height="30" /><path d="M35 35V15h20v20" /></> : null}
+      {kind === 'peak' ? <path d="M10 65 45 15l20 28 15-18 30 40z" /> : null}
       {kind === 'archive' ? <><rect x="15" y="20" width="90" height="45" /><path d="M25 30h70M25 42h70M25 54h70" /></> : null}
     </svg>
   );

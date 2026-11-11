@@ -14,7 +14,7 @@ const policy: TownPolicy = {
 function input(overrides: Partial<TownAdapterInput> = {}): TownAdapterInput {
   return {
     workspaceId: 'ws-1', observedAt: ago(3), fetchFailed: false,
-    dashboard: { mcp: { running: true, url: null, workspaceId: 'ws-1' }, agentState: 'idle', inFlight: [] },
+    dashboard: { mcp: { running: true, url: null, workspaceId: 'ws-1' }, agentState: 'idle', codex: { installed: true, version: '1.2.3' }, inFlight: [] },
     goalOptions: [{ goalId: 'g1', goalKey: 'one' }],
     taskResults: [{
       goalId: 'g1', goalRevision: 1, status: 'active',
@@ -41,7 +41,7 @@ describe('town building facts', () => {
     const data = input({ observedAt: ago(600) });
     const board = deriveTown(buildTownSnapshot(data), policy).board;
     expect(board.trust).toBe('unknown');
-    expect(deriveBuildingFacts(data, board)).toEqual({ gate: { mcpRunning: null }, hall: null, review: null, archive: null });
+    expect(deriveBuildingFacts(data, board)).toEqual({ gate: { mcpRunning: null }, hall: null, review: null, archive: null, forge: null, peak: null, plaza: null });
   });
 
   it('shows nothing when the last read failed', () => {
@@ -49,5 +49,33 @@ describe('town building facts', () => {
     const facts = deriveBuildingFacts(data, deriveTown(buildTownSnapshot(data), policy).board);
     expect(facts.hall).toBeNull();
     expect(facts.gate.mcpRunning).toBeNull();
+  });
+
+  it('counts only calls really running for Forge, Peak and Plaza', () => {
+    const call = (callId: string, toolName: string, clientName: string | null): { callId: string; toolName: string; startedAt: string; clientName: string | null } => ({ callId, toolName, startedAt: ago(5), clientName });
+    const base = input();
+    const data = input({
+      dashboard: {
+        ...base.dashboard!, agentState: 'working',
+        inFlight: [call('1', 'codex_run', 'A'), call('2', 'search_text', 'A'), call('3', 'find_files', null), call('4', 'read_file', 'B')],
+      },
+    });
+    const facts = deriveBuildingFacts(data, deriveTown(buildTownSnapshot(data), policy).board);
+    expect(facts.forge).toEqual({ installed: true, version: '1.2.3', running: 1 });
+    expect(facts.peak).toEqual({ running: 2 });
+    expect(facts.plaza).toEqual({ runningCalls: 4, aiCount: 3 });
+  });
+
+  it('reports Codex as not installed, never as working', () => {
+    const base = input();
+    const data = input({ dashboard: { ...base.dashboard!, codex: { installed: false, version: null } } });
+    const facts = deriveBuildingFacts(data, deriveTown(buildTownSnapshot(data), policy).board);
+    expect(facts.forge).toEqual({ installed: false, version: null, running: 0 });
+  });
+
+  it('has no dashboard data → Forge, Peak, Plaza unknown', () => {
+    const data = input({ dashboard: null });
+    const facts = deriveBuildingFacts(data, deriveTown(buildTownSnapshot(data), policy).board);
+    expect([facts.forge, facts.peak, facts.plaza]).toEqual([null, null, null]);
   });
 });

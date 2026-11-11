@@ -63,6 +63,12 @@ export interface TownCopy {
   readonly ownerUnsupported: string; readonly unverifiedHint: string;
   readonly resting: string; readonly previously: string;
   readonly activeAi: string; readonly aiUnknown: string; readonly aiVisibilityNote: string;
+  readonly plaza: string; readonly forge: string; readonly peak: string;
+  readonly approvalGate: string; readonly messenger: string; readonly catStudio: string; readonly trainingYard: string;
+  readonly plazaFacts: (calls: number, ai: number) => string;
+  readonly forgeFacts: (installed: boolean, version: string | null, running: number) => string;
+  readonly peakFacts: (running: number) => string;
+  readonly notSupported: string; readonly demoOnly: string;
   readonly aiCalls: (n: number) => string; readonly byAi: string;
 }
 
@@ -87,6 +93,14 @@ const TH: TownCopy = {
   activeAi: 'AI ที่กำลังใช้งานผ่าน lnwjud', aiUnknown: 'ไม่ทราบชื่อ AI',
   aiVisibilityNote: 'เห็นเฉพาะ AI ที่ทำงานผ่าน lnwjud เท่านั้น AI ที่ไม่ได้ผ่านที่นี่จะไม่ปรากฏ (ไม่ได้แปลว่าว่าง)',
   aiCalls: (n) => `${n} งาน`, byAi: 'โดย',
+  plaza: 'Central Plaza · ลานกลางเมือง', forge: 'Codex Forge · โรงตีดาบ Codex', peak: 'Research Peak · ยอดเขาค้นคว้า',
+  approvalGate: 'Approval Gate · ประตูอนุมัติ', messenger: 'Messenger Post · ที่ทำการส่งสาร',
+  catStudio: 'Orange Cat Studio · สตูดิโอแมวส้ม', trainingYard: 'Training Yard · ลานฝึก',
+  plazaFacts: (calls, ai) => `ตอนนี้มีงานรันอยู่ ${calls} งาน จาก ${ai} AI`,
+  forgeFacts: (installed, version, running) => `${installed ? `ติดตั้งแล้ว${version === null ? '' : ` (v${version})`}` : 'ยังไม่ได้ติดตั้ง'} · งาน Codex ที่รันอยู่ ${running}`,
+  peakFacts: (running) => `งานค้นหา/ค้นคว้าที่รันอยู่ ${running}`,
+  notSupported: 'ยังไม่รองรับ: ยังไม่มีข้อมูลจริงส่งมาให้หน้านี้ จึงไม่แสดงสถานะ (ไม่ใช่ "ว่าง")',
+  demoOnly: 'ตัวอย่างเท่านั้น ยังไม่มีข้อมูลจริง ไม่แสดงสถานะการทำงาน',
 };
 
 const EN: TownCopy = {
@@ -109,6 +123,13 @@ const EN: TownCopy = {
   activeAi: 'AIs working through lnwjud', aiUnknown: 'AI name unknown',
   aiVisibilityNote: 'Only AIs working through lnwjud are visible. An AI that does not go through here will not appear (that does not mean it is idle).',
   aiCalls: (n) => `${n} call(s)`, byAi: 'by',
+  plaza: 'Central Plaza', forge: 'Codex Forge', peak: 'Research Peak',
+  approvalGate: 'Approval Gate', messenger: 'Messenger Post', catStudio: 'Orange Cat Studio', trainingYard: 'Training Yard',
+  plazaFacts: (calls, ai) => `${calls} call(s) running now from ${ai} AI(s)`,
+  forgeFacts: (installed, version, running) => `${installed ? `Installed${version === null ? '' : ` (v${version})`}` : 'Not installed'} · Codex calls running ${running}`,
+  peakFacts: (running) => `Look-up calls running ${running}`,
+  notSupported: 'Not supported yet: no real data is sent to this page, so no status is shown (this is not "idle").',
+  demoOnly: 'Demo only: no real data, so no working status is shown.',
 };
 
 const COPY: Readonly<Record<UiLocale, TownCopy>> = { th: TH, en: EN };
