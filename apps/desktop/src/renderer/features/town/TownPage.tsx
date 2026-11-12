@@ -85,12 +85,15 @@ export function TownPage({ locale, workspaceId }: TownPageProps): ReactElement {
             </Building>
             <Building className="town-plaza" title={copy.plaza} art="plaza">
               <p>{model.facts.plaza === null ? copy.unknownFact : copy.plazaFacts(model.facts.plaza.runningCalls, model.facts.plaza.aiCount)}</p>
+              {model.facts.plaza === null ? null : <small className="hint">{copy.recentFacts(model.facts.plaza.recent.finished, model.facts.plaza.recent.failed)}</small>}
             </Building>
             <Building className="town-forge" title={copy.forge} art="forge">
               <p>{model.facts.forge === null ? copy.unknownFact : copy.forgeFacts(model.facts.forge.installed, model.facts.forge.version, model.facts.forge.running)}</p>
+              {model.facts.forge === null ? null : <small className="hint">{copy.recentFacts(model.facts.forge.recent.finished, model.facts.forge.recent.failed)}</small>}
             </Building>
             <Building className="town-peak" title={copy.peak} art="peak">
               <p>{model.facts.peak === null ? copy.unknownFact : copy.peakFacts(model.facts.peak.running)}</p>
+              {model.facts.peak === null ? null : <small className="hint">{copy.recentFacts(model.facts.peak.recent.finished, model.facts.peak.recent.failed)}</small>}
             </Building>
             <Building className="town-approval" title={copy.approvalGate} art="gate">
               <p>{model.facts.approval === null ? copy.unknownFact : copy.approvalFacts(model.facts.approval.pending)}</p>

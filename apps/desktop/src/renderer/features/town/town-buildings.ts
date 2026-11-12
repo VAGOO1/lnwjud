@@ -17,13 +17,34 @@ export interface TownBuildingFacts {
   } | null;
   readonly archive: { readonly checkpointedGoals: number; readonly latestCheckpointAt: string | null } | null;
   /** Codex Forge: is the Codex helper installed, and how many codex_* calls are running right now. */
-  readonly forge: { readonly installed: boolean; readonly version: string | null; readonly running: number } | null;
+  readonly forge: { readonly installed: boolean; readonly version: string | null; readonly running: number; readonly recent: RecentCalls } | null;
   /** Research Peak: look-up calls running right now (conservative name prefixes only). */
-  readonly peak: { readonly running: number } | null;
+  readonly peak: { readonly running: number; readonly recent: RecentCalls } | null;
   /** Central Plaza: all calls running right now and how many distinct AI names sit behind them. */
-  readonly plaza: { readonly runningCalls: number; readonly aiCount: number } | null;
+  readonly plaza: { readonly runningCalls: number; readonly aiCount: number; readonly recent: RecentCalls } | null;
   /** Approval Gate: owner approvals waiting in the whole app (count only, never the request). */
   readonly approval: { readonly pending: number } | null;
+}
+
+/** Calls that finished in the last RECENT_WINDOW_MS, from the real work log of this project. */
+export interface RecentCalls { readonly finished: number; readonly failed: number }
+export const RECENT_WINDOW_MS = 15 * 60_000;
+
+function recentCalls(input: TownAdapterInput, match: (toolName: string) => boolean): RecentCalls {
+  if (input.observedAt === null) return { finished: 0, failed: 0 };
+  const observed = Date.parse(input.observedAt);
+  let finished = 0;
+  let failed = 0;
+  for (const entry of input.dashboard?.workLog ?? []) {
+    if (entry.kind === 'task') continue;
+    if (entry.workspaceId !== null && entry.workspaceId !== input.workspaceId) continue;
+    const at = Date.parse(entry.timestamp);
+    if (!Number.isFinite(at) || !Number.isFinite(observed) || at > observed || observed - at > RECENT_WINDOW_MS) continue;
+    if (!match(entry.toolName)) continue;
+    finished += 1;
+    if (entry.kind === 'error') failed += 1;
+  }
+  return { finished, failed };
 }
 
 /** Conservative on purpose: a tool that does not match is simply not counted, never mis-counted. */
@@ -62,11 +83,16 @@ export function deriveBuildingFacts(input: TownAdapterInput, board: TownMissionB
     forge: codex === null ? null : {
       installed: codex.installed, version: codex.version,
       running: inFlight.filter((call) => FORGE_TOOL.test(call.toolName)).length,
+      recent: recentCalls(input, (name) => FORGE_TOOL.test(name)),
     },
-    peak: input.dashboard === null ? null : { running: inFlight.filter((call) => PEAK_TOOL.test(call.toolName)).length },
+    peak: input.dashboard === null ? null : {
+      running: inFlight.filter((call) => PEAK_TOOL.test(call.toolName)).length,
+      recent: recentCalls(input, (name) => PEAK_TOOL.test(name)),
+    },
     plaza: input.dashboard === null ? null : {
       runningCalls: inFlight.length,
       aiCount: new Set(inFlight.map((call) => call.clientName ?? null)).size,
+      recent: recentCalls(input, () => true),
     },
     gate: { mcpRunning: input.dashboard === null ? null : input.dashboard.mcp.running },
     hall: {
