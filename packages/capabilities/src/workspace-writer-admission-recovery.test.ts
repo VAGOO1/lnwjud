@@ -1,10 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WindowsNativeAuthority, type NativeAttemptBinding, type WindowsContainmentRpcRequest, type WindowsContainmentServiceClient } from '@lnwjud/process';
 import { DurableShellTaskStore, durableShellNativeBinding, type DurableTaskMetadata, type DurableShellTaskState } from './durable-shell-task-store.js';
+import type { DurableShellTaskIndex } from './durable-shell-task-index.js';
 import { SharedManagedWriterAdmission } from './shared-managed-writer-admission.js';
 import { SqliteWorkspaceWriterLease } from './workspace-writer-lease.js';
 import { ShellCapabilityBackend } from './shell-backend.js';
@@ -21,6 +22,7 @@ interface MockAuthorityContext {
   readonly setPhase: (phase: number, details?: { outcome?: number; exitCode?: number; targetPid?: number; reason?: string }) => void;
   readonly setAttemptLost: (lost: boolean) => void;
   readonly getCancelledAttempts: () => readonly string[];
+  readonly getRequests: () => readonly WindowsContainmentRpcRequest[];
 }
 
 function createMockAuthority(root: string): MockAuthorityContext {
@@ -31,9 +33,11 @@ function createMockAuthority(root: string): MockAuthorityContext {
   let currentReason: string | undefined;
   let attemptLost = false;
   const cancelled: string[] = [];
+  const requests: WindowsContainmentRpcRequest[] = [];
 
   const client: WindowsContainmentServiceClient = {
     async request<T>(request: WindowsContainmentRpcRequest): Promise<T> {
+      requests.push(request);
       if (request.command === 'cancel') {
         cancelled.push(request.identity.attemptId);
         currentPhase = 4;
@@ -97,6 +101,7 @@ function createMockAuthority(root: string): MockAuthorityContext {
       attemptLost = lost;
     },
     getCancelledAttempts: () => [...cancelled],
+    getRequests: () => [...requests],
   };
 }
 
@@ -144,6 +149,7 @@ interface FixtureContext {
   readonly admission: SharedManagedWriterAdmission;
   readonly lease: SqliteWorkspaceWriterLease;
   readonly store: DurableShellTaskStore;
+  readonly index: DurableShellTaskIndex;
   readonly backend: ShellCapabilityBackend;
   readonly advanceTime: (ms: number) => void;
   readonly getTime: () => number;
@@ -158,9 +164,14 @@ async function fixture(currentTime = 10_000): Promise<FixtureContext> {
   const nowProvider = (): number => now;
 
   const mock = createMockAuthority(root);
-  const admission = new SharedManagedWriterAdmission(taskDirectory, mock.authority);
+  // Exercise mocked Windows containment consistently on every test host.
+  const admission = new SharedManagedWriterAdmission(taskDirectory, mock.authority, 'win32');
   const lease = new SqliteWorkspaceWriterLease(dbPath, nowProvider, admission);
   const store = new DurableShellTaskStore(taskDirectory, { windowsNativeAuthority: mock.authority });
+  const index = (store as unknown as { activeIndex: DurableShellTaskIndex }).activeIndex;
+  // Initialize empty storage before installing artificial task evidence. Admission
+  // must not bootstrap or reconcile a nonempty, uninitialized task root.
+  await index.initialize();
   const backend = new ShellCapabilityBackend({
     allowedRoots: [root],
     taskStateDirectory: taskDirectory,
@@ -174,6 +185,7 @@ async function fixture(currentTime = 10_000): Promise<FixtureContext> {
     admission,
     lease,
     store,
+    index,
     backend,
     advanceTime: (ms: number): void => { now += ms; },
     getTime: (): number => now,
@@ -181,7 +193,7 @@ async function fixture(currentTime = 10_000): Promise<FixtureContext> {
 }
 
 describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle', () => {
-  it('1. Expired Lease + Terminal Reservation: releases verified reservation and acquires lease', async () => {
+  it('1. Expired Lease + Terminal Reservation: requires explicit owner status before lease recovery', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
@@ -218,7 +230,7 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
@@ -227,14 +239,29 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     f.advanceTime(35_000); // Expire lease
+
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true)).toMatchObject({
+      ok: false, error: { code: 'CONFLICT' },
+    });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
+
+    expect(await f.store.snapshot(taskId, undefined, { clientId, sessionId: 'session-2', workspaceId }))
+      .toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+    expect(await f.index.hasReservation(taskId, digest)).toBe(false);
+    expect(f.mock.getRequests().length).toBeGreaterThan(0);
+    expect(f.mock.getRequests().every((request) => request.command === 'inspect' && request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
 
     const recovered = await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true);
     expect(recovered.ok).toBe(true);
     if (!recovered.ok) return;
     expect(recovered.value.generation).toBe(initial.ok ? initial.value.generation + 1 : 2);
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
   it('2. Expired Lease + Active Worker: refuses lease takeover while worker is running', async () => {
@@ -273,15 +300,16 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     f.advanceTime(35_000);
 
@@ -289,8 +317,11 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     expect(attempt.ok).toBe(false);
     if (!attempt.ok) {
       expect(attempt.error.code).toBe('CONFLICT');
-      expect(attempt.error.message).toContain('Repository import requires exclusive managed writer admission');
+      expect(attempt.error.details).toMatchObject({ blocker_state: 'held', recovery_requirement: 'explicit_owner_scoped_recovery' });
     }
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
   it('3. Expired Lease + Unknown Worker: refuses lease takeover without verified proof', async () => {
@@ -328,15 +359,16 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     f.advanceTime(35_000);
 
@@ -344,11 +376,24 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     expect(attempt.ok).toBe(false);
     if (!attempt.ok) {
       expect(attempt.error.code).toBe('CONFLICT');
-      expect((attempt.error as unknown as { details?: Record<string, unknown> }).details?.blocker_state).toBe('unknown');
+      // Admission reports the held marker, not an unperformed liveness probe.
+      expect(attempt.error.details).toMatchObject({ blocker_state: 'held', recovery_requirement: 'explicit_owner_scoped_recovery' });
     }
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
+
+    expect(await f.store.snapshot(taskId, undefined, { clientId, sessionId: 'session-2', workspaceId }))
+      .toMatchObject({ ok: true, value: { state: 'termination_unverified' } });
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
+    expect(requestsAfterRecovery.length).toBeGreaterThan(0);
+    expect(requestsAfterRecovery.every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    expect(await f.admission.holdExclusiveProbe(workspaceId)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('4. Missing/Corrupt Task Metadata: safely blocks without silently dropping reservation', async () => {
+  it.each(['missing', 'corrupt'])('4. %s Task Metadata: safely blocks without silently dropping reservation', async (metadataState) => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
@@ -357,22 +402,24 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     const digest = createHash('sha256').update(taskId).digest('hex');
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
-    await writeFile(path.join(taskDir, 'task.json'), 'CORRUPT_NOT_JSON');
+    if (metadataState === 'corrupt') await writeFile(path.join(taskDir, 'task.json'), 'CORRUPT_NOT_JSON');
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     const probe = await f.admission.holdExclusiveProbe(workspaceId);
     expect(probe.ok).toBe(false);
     if (!probe.ok) {
       expect(probe.error.code).toBe('CONFLICT');
     }
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
   });
 
   it('5. Cross-Session Recovery: allows same client to inspect and cancel across sessions', async () => {
@@ -394,7 +441,6 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       owner: { clientId, sessionId: 'session-1', workspaceId },
     }, digest);
 
-    await (f.store as unknown as { activeIndex: { initialize: () => Promise<void> } }).activeIndex.initialize();
     f.mock.setPhase(3, { targetPid: 4567 }); // running initially
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
@@ -409,17 +455,21 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     const session2Owner: CapabilityTaskOwner = { clientId, sessionId: 'session-2', workspaceId };
+    expect(await f.admission.holdExclusiveProbe(workspaceId)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
     const snapshot = await f.store.snapshot(taskId, undefined, session2Owner);
     expect(snapshot.ok).toBe(true);
     if (snapshot.ok) {
@@ -436,10 +486,14 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       expect(cancelled.value.state).toBe('cancelled');
     }
     expect(f.mock.getCancelledAttempts()).toContain(binding.attemptId);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(false);
+    expect(f.mock.getRequests().every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterCancellation = f.mock.getRequests();
 
     const probe = await f.admission.holdExclusiveProbe(workspaceId);
     expect(probe.ok).toBe(true);
     if (probe.ok) await probe.value.releaseAfterVerifiedTermination();
+    expect(f.mock.getRequests()).toEqual(requestsAfterCancellation);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
   it('6. Ownership Rejection: strictly rejects foreign client and foreign workspace', async () => {
@@ -472,6 +526,17 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
+    expect(await f.index.reserve({
+      taskId,
+      capacityClass: 'durable_shell',
+      requestDigest: digest,
+      mutationKind: 'opaque',
+      nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
+      ownerClientId: 'client-1',
+      ownerWorkspaceId: 'workspace-1',
+    })).toMatchObject({ ok: true, value: { created: true } });
+
     const foreignClientOwner: CapabilityTaskOwner = { clientId: 'attacker-client', sessionId: 'session-1', workspaceId: 'workspace-1' };
     expect(await f.store.snapshot(taskId, undefined, foreignClientOwner)).toMatchObject({
       ok: false, error: { code: 'PERMISSION_DENIED' },
@@ -489,6 +554,9 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     expect(await f.store.cancel(taskId, foreignWorkspaceOwner)).toMatchObject({
       ok: false, error: { code: 'PERMISSION_DENIED' },
     });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
   });
 
   it('7. Concurrent Recovery Race: guarantees fencing serialization and distinct generation', async () => {
@@ -538,7 +606,7 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     }
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('9. Process Crash: cleans up after verified native proof without leaving stuck markers', async () => {
+  it('9. Process Crash: explicit owner status releases only after verified native proof', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
@@ -571,15 +639,21 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
+
+    expect(await f.admission.holdExclusiveProbe(workspaceId)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
 
     const snap = await f.store.snapshot(taskId, undefined, { clientId, sessionId: 'session-2', workspaceId });
     expect(snap.ok).toBe(true);
@@ -587,10 +661,14 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       expect(snap.value.state).toBe('failed');
       expect(snap.value.exit_code).toBe(1);
     }
+    expect(await f.index.hasReservation(taskId, digest)).toBe(false);
+    expect(f.mock.getRequests().every((request) => request.command === 'inspect' && request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
 
     const probe = await f.admission.holdExclusiveProbe(workspaceId);
     expect(probe.ok).toBe(true);
     if (probe.ok) await probe.value.releaseAfterVerifiedTermination();
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   });
 
   it('10. Repository Import Conflict: exclusive repository import blocks and unblocks correctly', async () => {
@@ -629,7 +707,6 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       owner: { clientId, sessionId: 'session-old', workspaceId },
     }, digest);
 
-    await (f.store as unknown as { activeIndex: { initialize: () => Promise<void> } }).activeIndex.initialize();
     f.mock.setPhase(3, { targetPid: 3456 }); // running
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
@@ -644,15 +721,20 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
       mutationKind: 'opaque',
       nativeBinding: binding,
+      nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
+
+    expect(await f.admission.holdExclusiveProbe(workspaceId)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
 
     const cancelled = await f.backend.cancelForGoal(clientId, workspaceId, taskId);
     expect(cancelled.ok).toBe(true);
@@ -660,10 +742,15 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       expect(cancelled.value.matched).toBe(true);
       expect(cancelled.value.state).toBe('cancelled');
     }
+    expect(f.mock.getCancelledAttempts()).toEqual([binding.attemptId]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(false);
+    expect(f.mock.getRequests().every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterCancellation = f.mock.getRequests();
 
     const probe = await f.admission.holdExclusiveProbe(workspaceId);
     expect(probe.ok).toBe(true);
     if (probe.ok) await probe.value.releaseAfterVerifiedTermination();
+    expect(f.mock.getRequests()).toEqual(requestsAfterCancellation);
   });
 
   it('12. Lease Generation Fencing: rejects mutations with stale generation or invalid token', async () => {
@@ -697,7 +784,7 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     await f.lease.end(workspaceId, 'call-gen2', lease2.value.generation);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('13. Service Restart Recovery: recovers abandoned reservation when attempt is lost from service memory', async () => {
+  it('13. Service Restart Recovery: only explicit owner status recovers an attempt lost from service memory', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
@@ -731,7 +818,7 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     });
     await writeFile(path.join(taskDir, 'task.json'), JSON.stringify(metadata));
 
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
+    expect(await f.index.reserve({
       taskId,
       capacityClass: 'durable_shell',
       requestDigest: digest,
@@ -740,153 +827,153 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
       nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
       ownerClientId: clientId,
       ownerWorkspaceId: workspaceId,
-    });
+    })).toMatchObject({ ok: true, value: { created: true } });
 
     // Simulate service restart: attempt is lost from service memory
     f.mock.setAttemptLost(true);
     f.advanceTime(35_000); // Expire lease
 
-    const recovered = await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true);
-    expect(recovered.ok).toBe(true);
-    if (!recovered.ok) return;
-    expect(recovered.value.generation).toBe(2);
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(taskId, digest)).toBe(true);
+    expect(await readFile(path.join(taskDir, 'task.json'), 'utf8')).toBe(JSON.stringify(metadata));
 
-    // Verify task.json was safely reconciled to failed with exit_code -1
+    // Exact-owned status, not lease admission, may obtain the abort tombstone.
     const snapshot = await f.store.snapshot(taskId, undefined, { clientId, sessionId: 'session-2', workspaceId });
     expect(snapshot.ok).toBe(true);
     if (snapshot.ok) {
       expect(snapshot.value.state).toBe('failed');
       expect(snapshot.value.exit_code).toBe(-1);
     }
+    expect(await f.index.hasReservation(taskId, digest)).toBe(false);
+    expect(f.mock.getRequests().filter((request) => request.command === 'abort'))
+      .toMatchObject([{ identity: { attemptId: binding.attemptId } }]);
+    expect(f.mock.getRequests().every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: true, value: { generation: 2 } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('14. Managed Writer Undispatched Attempt Recovery: aborts undispatched attempt and unblocks repository import', async () => {
+  it('14. Managed Writer Undispatched Attempt Recovery: admission waits for an explicit owner abort', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
 
-    await f.lease.acquire(workspaceId, clientId, 'session-1', 30);
-
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-1', 30)).toMatchObject({ ok: true });
     f.mock.setPhase(0);
     const taskId = randomUUID();
-    const digest = createHash('sha256').update(taskId).digest('hex');
-    const binding: NativeAttemptBinding = {
-      taskId,
-      reservationId: taskId,
-      attemptId: randomUUID(),
-      generation: 1,
-      requestDigest: digest,
-      ownerClientId: clientId,
-      ownerSessionId: 'session-1',
-      workspaceId,
-    };
-
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
-
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
-      taskId,
-      capacityClass: 'managed_writer',
-      requestDigest: digest,
-      mutationKind: 'opaque_contained_process',
-      nativeBinding: binding,
+    const writer = await f.admission.enter({
+      actorClientId: clientId,
+      actorSessionId: 'session-1',
+      nativeTaskId: taskId,
+      workspaceId,
+      kind: 'contained_process',
       nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
-      ownerClientId: clientId,
-      ownerWorkspaceId: workspaceId,
     });
+    expect(writer.ok).toBe(true);
+    if (!writer.ok) return;
+    const binding = writer.value.nativeBinding!;
+    expect(binding).toBeDefined();
 
     f.advanceTime(35_000);
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(await f.admission.holdExclusiveProbe(workspaceId)).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(true);
 
-    const recovered = await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true);
-    expect(recovered.ok).toBe(true);
-    if (!recovered.ok) return;
-    expect(recovered.value.generation).toBe(2);
+    expect(writer.value.abortBeforeLaunch).toBeDefined();
+    await writer.value.abortBeforeLaunch!();
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(false);
+    expect(f.mock.getRequests().filter((request) => request.command === 'abort'))
+      .toMatchObject([{ identity: { attemptId: binding.attemptId } }]);
+    expect(f.mock.getRequests().every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: true, value: { generation: 2 } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('15. Managed Writer Live Descendants: blocks repository import while descendants remain active', async () => {
+  it('15. Managed Writer Live Descendants: admission and explicit owner release keep unverified descendants fenced', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
 
-    await f.lease.acquire(workspaceId, clientId, 'session-1', 30);
-
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-1', 30)).toMatchObject({ ok: true });
     f.mock.setPhase(5, { reason: 'ACTIVE_PROCESSES_REMAIN' });
     const taskId = randomUUID();
-    const digest = createHash('sha256').update(taskId).digest('hex');
-    const binding: NativeAttemptBinding = {
-      taskId,
-      reservationId: taskId,
-      attemptId: randomUUID(),
-      generation: 1,
-      requestDigest: digest,
-      ownerClientId: clientId,
-      ownerSessionId: 'session-1',
-      workspaceId,
-    };
-
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
-
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
-      taskId,
-      capacityClass: 'managed_writer',
-      requestDigest: digest,
-      mutationKind: 'opaque_contained_process',
-      nativeBinding: binding,
+    const writer = await f.admission.enter({
+      actorClientId: clientId,
+      actorSessionId: 'session-1',
+      nativeTaskId: taskId,
+      workspaceId,
+      kind: 'contained_process',
       nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
-      ownerClientId: clientId,
-      ownerWorkspaceId: workspaceId,
     });
+    expect(writer.ok).toBe(true);
+    if (!writer.ok) return;
+    const binding = writer.value.nativeBinding!;
+    expect(binding).toBeDefined();
 
     f.advanceTime(35_000);
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true)).toMatchObject({
+      ok: false, error: { code: 'CONFLICT', details: { blocker_state: 'held', recovery_requirement: 'explicit_owner_scoped_recovery' } },
+    });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(true);
 
-    const recovered = await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true);
-    expect(recovered.ok).toBe(false);
-    if (recovered.ok) return;
-    expect(recovered.error.message).toMatch(/Unverified native process descendants block repository import/);
+    await expect(writer.value.abortBeforeLaunch!()).rejects.toThrow('MANAGED_WRITER_ABORT_UNVERIFIED');
+    await expect(writer.value.releaseAfterVerifiedTermination()).rejects.toThrow('MANAGED_WRITER_RELEASE_UNVERIFIED');
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(true);
+    expect(f.mock.getRequests().every((request) => request.identity.attemptId === binding.attemptId)).toBe(true);
+    const requestsAfterRecovery = f.mock.getRequests();
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
-  it('16. Crash After Dispatch + Terminal Reconciled: recovers cleanly once kernel confirms termination', async () => {
+  it('16. Crash After Dispatch + Terminal Proof: admission waits for an explicit owner release', async () => {
     const f = await fixture(10_000);
     const workspaceId = 'workspace-1';
     const clientId = 'client-1';
 
-    await f.lease.acquire(workspaceId, clientId, 'session-1', 30);
-
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-1', 30)).toMatchObject({ ok: true });
     f.mock.setPhase(4, { outcome: 0, exitCode: 0 });
     const taskId = randomUUID();
-    const digest = createHash('sha256').update(taskId).digest('hex');
-    const binding: NativeAttemptBinding = {
-      taskId,
-      reservationId: taskId,
-      attemptId: randomUUID(),
-      generation: 1,
-      requestDigest: digest,
-      ownerClientId: clientId,
-      ownerSessionId: 'session-1',
-      workspaceId,
-    };
-
     const taskDir = path.join(f.taskDirectory, taskId);
     await mkdir(taskDir, { recursive: true });
-
-    await (f.store as unknown as { activeIndex: { reserve: (input: unknown) => Promise<unknown> } }).activeIndex.reserve({
-      taskId,
-      capacityClass: 'managed_writer',
-      requestDigest: digest,
-      mutationKind: 'opaque_contained_process',
-      nativeBinding: binding,
+    const writer = await f.admission.enter({
+      actorClientId: clientId,
+      actorSessionId: 'session-1',
+      nativeTaskId: taskId,
+      workspaceId,
+      kind: 'contained_process',
       nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
-      ownerClientId: clientId,
-      ownerWorkspaceId: workspaceId,
     });
+    expect(writer.ok).toBe(true);
+    if (!writer.ok) return;
+    const binding = writer.value.nativeBinding!;
+    expect(binding).toBeDefined();
 
     f.advanceTime(35_000);
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(true);
 
-    const recovered = await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true);
-    expect(recovered.ok).toBe(true);
-    if (!recovered.ok) return;
-    expect(recovered.value.generation).toBe(2);
+    await writer.value.releaseAfterVerifiedTermination();
+    expect(await f.index.hasReservation(writer.value.id, binding.requestDigest)).toBe(false);
+    expect(f.mock.getRequests()).toMatchObject([{ command: 'inspect', identity: { attemptId: binding.attemptId } }]);
+    const requestsAfterRecovery = f.mock.getRequests();
+    expect(await f.lease.acquire(workspaceId, clientId, 'session-2', 60, true))
+      .toMatchObject({ ok: true, value: { generation: 2 } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 
   it('17. Idempotent Recovery: repeated recovery calls yield identical generation and valid lease', async () => {
@@ -912,5 +999,78 @@ describe('Mandatory Regression Suite: Writer Admission & Task Recovery Lifecycle
     if (!inspected.ok) return;
     expect(inspected.value.state).toBe('active');
     expect(inspected.value.generation).toBe(2);
+  }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
+
+  it('18. Exact-Owned Recovery: terminal status releases its own marker without touching another owner', async () => {
+    const f = await fixture();
+    f.mock.setPhase(4, { outcome: 0, exitCode: 0 });
+    const tasks = await Promise.all(['first', 'second'].map(async (name) => {
+      const taskId = randomUUID();
+      const digest = createHash('sha256').update(taskId).digest('hex');
+      const owner = { clientId: `${name}-client`, sessionId: `${name}-session`, workspaceId: `${name}-workspace` } satisfies CapabilityTaskOwner;
+      const binding = durableShellNativeBinding({
+        taskId,
+        executable: 'node.exe',
+        arguments: ['-e', '1'],
+        cwd: f.root,
+        timeoutSeconds: 30,
+        maxOutputBytes: 1024,
+        includeStdout: true,
+        includeStderr: true,
+        owner,
+      }, digest);
+      const taskDir = path.join(f.taskDirectory, taskId);
+      await mkdir(taskDir, { recursive: true });
+      const metadataPath = path.join(taskDir, 'task.json');
+      await writeFile(metadataPath, JSON.stringify(makeCanonicalMetadata({
+        taskId, clientId: owner.clientId, sessionId: owner.sessionId, workspaceId: owner.workspaceId,
+        state: 'completed', exitCode: 0, binding,
+      })));
+      const reserved = await f.index.reserve({
+        taskId, requestDigest: digest, capacityClass: 'durable_shell', mutationKind: 'opaque',
+        nativeBinding: binding, nativeReceiptPath: path.join(taskDir, 'containment.receipt.json'),
+        ownerClientId: owner.clientId, ownerWorkspaceId: owner.workspaceId,
+      });
+      expect(reserved.ok).toBe(true);
+      if (!reserved.ok) throw new Error('Test reservation was not established');
+      return { taskId, digest, owner, binding, metadataPath, markerPath: reserved.value.markerPath };
+    }));
+    const [first, second] = tasks;
+    if (first === undefined || second === undefined) throw new Error('Both test tasks must be established');
+    const secondMarker = await readFile(second.markerPath, 'utf8');
+    const secondMetadata = await readFile(second.metadataPath, 'utf8');
+
+    expect(await f.admission.holdExclusiveProbe(first.owner.workspaceId))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual([]);
+
+    expect(await f.store.snapshot(first.taskId, undefined, first.owner))
+      .toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+    expect(await f.index.hasReservation(first.taskId, first.digest)).toBe(false);
+    expect(await f.index.hasReservation(second.taskId, second.digest)).toBe(true);
+    expect(await readFile(second.markerPath, 'utf8')).toBe(secondMarker);
+    expect(await readFile(second.metadataPath, 'utf8')).toBe(secondMetadata);
+    expect(f.mock.getRequests().length).toBeGreaterThan(0);
+    expect(f.mock.getRequests().every((request) => request.command === 'inspect' && request.identity.attemptId === first.binding.attemptId)).toBe(true);
+    const requestsAfterFirstRecovery = f.mock.getRequests();
+
+    expect(await f.store.snapshot(second.taskId, undefined, first.owner))
+      .toMatchObject({ ok: false, error: { code: 'PERMISSION_DENIED' } });
+    expect(await f.admission.holdExclusiveProbe(first.owner.workspaceId))
+      .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterFirstRecovery);
+    expect(await readFile(second.markerPath, 'utf8')).toBe(secondMarker);
+
+    expect(await f.store.snapshot(second.taskId, undefined, second.owner))
+      .toMatchObject({ ok: true, value: { state: 'completed', exit_code: 0 } });
+    expect(await f.index.hasReservation(second.taskId, second.digest)).toBe(false);
+    const secondRecoveryRequests = f.mock.getRequests().slice(requestsAfterFirstRecovery.length);
+    expect(secondRecoveryRequests.length).toBeGreaterThan(0);
+    expect(secondRecoveryRequests.every((request) => request.command === 'inspect' && request.identity.attemptId === second.binding.attemptId)).toBe(true);
+
+    const requestsAfterSecondRecovery = f.mock.getRequests();
+    expect(await f.lease.acquire(first.owner.workspaceId, first.owner.clientId, first.owner.sessionId, 60))
+      .toMatchObject({ ok: true, value: { generation: 1 } });
+    expect(f.mock.getRequests()).toEqual(requestsAfterSecondRecovery);
   }, WINDOWS_WRITER_IO_TEST_TIMEOUT_MS);
 });

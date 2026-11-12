@@ -82,6 +82,8 @@ docs/mcp/*
 docs/architecture/*
 !docs/architecture/UPGRADE_ARCHITECTURE.md
 !docs/architecture/TOOL_CONTRACT.md
+!docs/architecture/WRITER_ADMISSION_SNAPSHOT.md
+!docs/architecture/NON_RECONCILING_WRITER_ADMISSION.md
 !docs/architecture/ROADMAP_PHASE_STATUS.md
 !docs/architecture/MUTATION_SAFETY_MATRIX.md
 !docs/architecture/WINDOWS_NATIVE_HELPER_SECURITY_REVIEW_2026_10_23.md

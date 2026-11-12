@@ -104,3 +104,5 @@ export { WINDOWS_CAPABILITY_BRIDGE_SHA256, WINDOWS_CAPABILITY_BRIDGE_SIZE_BYTES 
 export { BoundedEventBuffer, type BufferedEvent, type EventPage } from './bounded-event-buffer.js';
 export { resolveNativeHostBridge } from './native-host-resolver.js';
 export { createHostWindowsNativeAuthority, createHostPosixProcessRuntime } from './host-native-authority.js';
+
+export { readWriterAdmissionSnapshot, type WriterAdmissionSnapshot } from './writer-admission-snapshot.js';

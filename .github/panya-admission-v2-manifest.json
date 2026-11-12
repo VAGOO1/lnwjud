@@ -1,0 +1,110 @@
+{
+  "base_commit": "c5d74df387ea10128147d639fce281b3bf095b6e",
+  "patch_sha256": "c057fefa2faca952b16f74f28743c30df4aa5d95ac74a66a114b6ec3487af19b",
+  "changed_files": [
+    {
+      "path": ".github/RELEASE_CHECKLIST.md",
+      "sha256": "09813588f226520f61c3c3c2e3cbd157dc17468e8981ba0640ad7755d62fb220"
+    },
+    {
+      "path": ".gitignore",
+      "sha256": "0ce0815f0ce231557bddfcf057ffbc3285776113b1fcd09907fa52b809fdb29b"
+    },
+    {
+      "path": "FULL_README.md",
+      "sha256": "8025d37a342d2305851237cf3a58a45f80022bee63d328031522f6f36e4541b4"
+    },
+    {
+      "path": "README.md",
+      "sha256": "359739c05b3b086bc0b71bc2940581cc153ec3f3769502cf22e17b286d93a57e"
+    },
+    {
+      "path": "docs/LNWJUD_CAPABILITIES.md",
+      "sha256": "debd590398b49e7166b95645bfc6beafabc49657b712ecb9cf696fb0d8ab1761"
+    },
+    {
+      "path": "docs/architecture/MUTATION_SAFETY_MATRIX.md",
+      "sha256": "046f3d89565e5a673293fe556b95fce4c180920955d6372840b446af854c1ab8"
+    },
+    {
+      "path": "docs/architecture/NON_RECONCILING_WRITER_ADMISSION.md",
+      "sha256": "987592832cabb417e0768b4beff400313858c3dc022256097aa99ebce6bd9cca"
+    },
+    {
+      "path": "docs/architecture/TOOL_CONTRACT.md",
+      "sha256": "2384548c6d775db4749065e12fe84da23b934860df308a8f0f3fcfe505fbf3eb"
+    },
+    {
+      "path": "docs/architecture/WRITER_ADMISSION_SNAPSHOT.md",
+      "sha256": "5453f0d13065355aea32d830fe4ecd7ec62e1372563daa42c17f59fc2b97f091"
+    },
+    {
+      "path": "packages/application/src/non-reconciling-writer-integration.test.ts",
+      "sha256": "13b12dce9c05dd2f632274ee156ee5f8c357fcd99bba941b8b00780b301d30b8"
+    },
+    {
+      "path": "packages/capabilities/src/durable-shell-task-index.test.ts",
+      "sha256": "3c69e039e4bd50ed52ff317a34d57f896918a09a95e62c93ebb3871444f3a64c"
+    },
+    {
+      "path": "packages/capabilities/src/durable-shell-task-index.ts",
+      "sha256": "aa9a5ab9087c1b7abedaa205031212da66e4994d902222035d511b99d09a7f84"
+    },
+    {
+      "path": "packages/capabilities/src/durable-shell-task-store.test.ts",
+      "sha256": "0cf8153ec5e3a84503a4e8498cb2932220a4715e6acd0714a1f5cd0fd4d19aff"
+    },
+    {
+      "path": "packages/capabilities/src/index.ts",
+      "sha256": "faea19d2c0ea0bea86e8188d8545632a5f4993b2ff6777917723f01fea13cc71"
+    },
+    {
+      "path": "packages/capabilities/src/managed-writer-capacity.test.ts",
+      "sha256": "e138c62292ccdf62c089bd350514c6f08553d2ed01c562cb912982ca5fdabafe"
+    },
+    {
+      "path": "packages/capabilities/src/non-reconciling-reservation.test.ts",
+      "sha256": "2099f3991a5938b4e0d4153ca1617a14f173deed2b02aec87ff836040bffe614"
+    },
+    {
+      "path": "packages/capabilities/src/shared-managed-writer-admission.ts",
+      "sha256": "aa8cee32a1cd3a22d8771c7d01c88f4078f9d5563223f7e65ea321b6f050879a"
+    },
+    {
+      "path": "packages/capabilities/src/workspace-writer-admission-recovery.test.ts",
+      "sha256": "8fb1641fc8080831eb1bd0ded8f121246077b22bca6a68f3f5d9b04a24d9fc97"
+    },
+    {
+      "path": "packages/capabilities/src/workspace-writer-lease.ts",
+      "sha256": "20444b7276726cb206817605828f21b5e1441d7ab06fc5111324a2f18b82f4ce"
+    },
+    {
+      "path": "packages/capabilities/src/writer-admission-snapshot.test.ts",
+      "sha256": "210529f99ba65ef1f7320592dcbb0bbb5ff510c3857f71934cc24da7326587a6"
+    },
+    {
+      "path": "packages/capabilities/src/writer-admission-snapshot.ts",
+      "sha256": "fd7494a4554463deebc909b6c618d6fcfc20170e52ef43e6c31b4b7529d7082f"
+    },
+    {
+      "path": "packages/mcp-server/src/core-tool-readiness.test.ts",
+      "sha256": "3b3429c209e3e7bb154927ad636c67329a28325b190b0079086d52df8b6c705a"
+    },
+    {
+      "path": "packages/mcp-server/src/tool-registry.test.ts",
+      "sha256": "4ae432e56cda252143cd4c11acbb05e858e0f1c20fe085bd36e786a2eee5f440"
+    },
+    {
+      "path": "packages/mcp-server/src/tool-runtime-fixtures.ts",
+      "sha256": "3c6f2c4763068553c23d718ab9b5e81113fa9eb299e69ba28264324b1025a417"
+    },
+    {
+      "path": "packages/mcp-server/src/tools/workspace-tools.ts",
+      "sha256": "871b4c3cd47470ba5782a1d271fcb1f21427ccffdbe0203567103e7697c7ce86"
+    },
+    {
+      "path": "packages/mcp-server/src/workspace-writer-admission-snapshot.test.ts",
+      "sha256": "0f976a3da9bbf69dfc6c73a8c8a6d3dbffdb07d5ffb8fcfb1ef194a5b653b41d"
+    }
+  ]
+}

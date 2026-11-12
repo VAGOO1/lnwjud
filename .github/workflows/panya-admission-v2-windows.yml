@@ -1,0 +1,103 @@
+name: PANYA admission v2 focused Windows tests
+
+on:
+  push:
+    branches: ['test/panya-admission-v2-windows-20261112']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: panya-admission-v2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  focused-windows-tests:
+    if: github.repository == 'VAGOO1/lnwjud'
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      GIT_CONFIG_COUNT: '2'
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: 'false'
+      GIT_CONFIG_KEY_1: core.eol
+      GIT_CONFIG_VALUE_1: lf
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout exact test commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Verify immutable patch input
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Get-Content '.github/panya-admission-v2-manifest.json' -Raw | ConvertFrom-Json
+          if ($manifest.base_commit -ne 'c5d74df387ea10128147d639fce281b3bf095b6e') { throw 'Unexpected base commit' }
+          if ($manifest.patch_sha256 -ne 'c057fefa2faca952b16f74f28743c30df4aa5d95ac74a66a114b6ec3487af19b') { throw 'Unexpected patch identity' }
+          if ($manifest.changed_files.Count -ne 26) { throw 'Unexpected patch file count' }
+          foreach ($file in $manifest.changed_files) {
+            $actual = (Get-FileHash -LiteralPath $file.path -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($actual -ne $file.sha256) { throw "Patch input mismatch: $($file.path)" }
+          }
+          Write-Host 'All 26 patch file hashes verified.'
+
+      - name: Setup pinned Node 24
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.1'
+          package-manager-cache: false
+
+      - name: Setup pinned pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: '10.15.0'
+          run_install: false
+
+      - name: Install locked dependencies without lifecycle scripts
+        run: |
+          pnpm install --frozen-lockfile --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --exit-code -- package.json pnpm-lock.yaml pnpm-workspace.yaml
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Run only the five focused test files
+        env:
+          NODE_OPTIONS: --conditions=development
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $isolated = Join-Path $env:RUNNER_TEMP 'panya-focused-state'
+          @('home', 'tmp', 'appdata', 'localappdata', 'data', 'config', 'cache') | ForEach-Object {
+            New-Item -ItemType Directory -Path (Join-Path $isolated $_) -Force | Out-Null
+          }
+          $env:HOME = Join-Path $isolated 'home'
+          $env:USERPROFILE = $env:HOME
+          $env:TEMP = Join-Path $isolated 'tmp'
+          $env:TMP = $env:TEMP
+          $env:APPDATA = Join-Path $isolated 'appdata'
+          $env:LOCALAPPDATA = Join-Path $isolated 'localappdata'
+          $env:XDG_DATA_HOME = Join-Path $isolated 'data'
+          $env:XDG_CONFIG_HOME = Join-Path $isolated 'config'
+          $env:XDG_CACHE_HOME = Join-Path $isolated 'cache'
+          New-Item -ItemType Directory -Path '.ci-results' -Force | Out-Null
+          node --version
+          node node_modules/vitest/vitest.mjs run `
+            packages/capabilities/src/writer-admission-snapshot.test.ts `
+            packages/mcp-server/src/workspace-writer-admission-snapshot.test.ts `
+            packages/capabilities/src/non-reconciling-reservation.test.ts `
+            packages/application/src/non-reconciling-writer-integration.test.ts `
+            packages/capabilities/src/workspace-writer-admission-recovery.test.ts `
+            --fileParallelism=false --reporter=default --reporter=json --outputFile=.ci-results/focused-results.json
+          exit $LASTEXITCODE
+
+      - name: Preserve exact test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: panya-admission-v2-windows-${{ github.sha }}
+          path: .ci-results/focused-results.json
+          if-no-files-found: warn
+          retention-days: 7

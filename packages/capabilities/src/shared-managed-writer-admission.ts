@@ -4,6 +4,7 @@ import { appError, err, ok, type Result } from '@lnwjud/domain';
 import { parseNativeAttemptBinding, type NativeAttemptBinding, type WindowsNativeAuthority } from '@lnwjud/process';
 import { DurableShellTaskIndex, type DurableTaskReservation } from './durable-shell-task-index.js';
 import { DurableShellTaskStore } from './durable-shell-task-store.js';
+import { readWriterAdmissionSnapshot, type WriterAdmissionSnapshot } from './writer-admission-snapshot.js';
 
 export type WriterContainmentKind = 'synchronous_mutation' | 'uncontained_process' | 'contained_process';
 
@@ -23,7 +24,7 @@ export interface ManagedWriterAdmissionLease {
 export class SharedManagedWriterAdmission {
   private readonly index: DurableShellTaskIndex;
 
-  constructor(taskDirectory: string, private readonly nativeAuthority?: WindowsNativeAuthority, private readonly platform: NodeJS.Platform = process.platform) {
+  constructor(private readonly taskDirectory: string, private readonly nativeAuthority?: WindowsNativeAuthority, private readonly platform: NodeJS.Platform = process.platform) {
     const store = new DurableShellTaskStore(taskDirectory, { ...(nativeAuthority === undefined ? {} : { windowsNativeAuthority: nativeAuthority }) });
     this.index = new DurableShellTaskIndex(taskDirectory, {
       maxConcurrentTasks: 10000,
@@ -34,11 +35,17 @@ export class SharedManagedWriterAdmission {
     });
   }
 
+  /** Observation does not initialize or reconcile the global admission index. */
+  public snapshot(): Promise<WriterAdmissionSnapshot> {
+    return readWriterAdmissionSnapshot(this.taskDirectory);
+  }
+
   /**
    * Acquire a short-lived repository-import-class barrier across the durable
-   * shell/process index. It inspects and conservatively refuses active or
-   * unverifiable tasks before a workspace lease is acquired or released.
+   * shell/process index. It refuses every existing reservation without native,
+   * PID or task inspection before a workspace lease is acquired or released.
    * The caller holds the barrier across its SQLite admission transaction.
+   * Admission never performs recovery; explicit exact-owned cleanup is separate.
    */
   async holdExclusiveProbe(workspaceId: string): Promise<Result<ManagedWriterAdmissionLease>> {
     if (!workspaceId) return err(appError('INVALID_INPUT', 'Workspace lease probe requires a workspace ID'));

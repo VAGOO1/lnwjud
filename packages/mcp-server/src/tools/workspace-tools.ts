@@ -43,12 +43,20 @@ export function workspaceTools(context: McpToolContext): McpToolDefinition[] {
     }),
     defineTool({
       name: 'workspace_writer_lease_acquire',
-      description: 'Acquire a durable exclusive writer lease for one registered workspace. Explicit recoverAbandoned with user confirmation may fence an idle previous session of the same client after 60 seconds; unrelated clients and active/unknown writers remain blocked.',
+      description: 'Acquire a durable exclusive writer lease for one registered workspace. Existing global writer reservations block acquisition without task/native/PID inspection, reconciliation or stale-lock reclamation. Explicit recoverAbandoned with user confirmation may fence an idle previous session of the same client after 60 seconds; it does not recover other reservations.',
       permission: 'WRITE', annotations: { readOnlyHint: false, destructiveHint: false },
       inputSchema: workspaceWriterLeaseAcquireSchema,
       handler: async (input) => context.services.workspaceWriterLease === undefined ? missingService()
         : context.services.workspaceWriterLease.acquire(input.workspaceId, context.actor.clientId, context.actor.sessionId ?? context.actor.clientId, input.ttlSeconds ?? 600,
           input.recoverAbandoned === true && input.userConfirmed === true),
+    }),
+    defineTool({
+      name: 'workspace_writer_admission_snapshot',
+      description: 'Read existing global writer reservation counts without initialization, locks, recovery, native process probes or cleanup. Missing, corrupt or changing evidence remains unknown. Metadata only: never grants admission or proves processes stopped. New acquisition and execution independently validate admission under their own lock.',
+      permission: 'READ', annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: workspaceWriterLeaseStatusSchema,
+      handler: async (input) => context.services.workspaceWriterLease?.admissionSnapshot === undefined ? missingService()
+        : context.services.workspaceWriterLease.admissionSnapshot(input.workspaceId),
     }),
     defineTool({
       name: 'workspace_writer_lease_status',

@@ -403,7 +403,7 @@ describe('MCP tool registry', () => {
   it('returns the exact deterministic tool order', () => {
     const registry = new ToolRegistry({}, actor);
     expect(registry.list().map((tool) => tool.name)).toEqual([
-      'workspace_list', 'workspace_path_preflight', 'workspace_writer_lease_acquire', 'workspace_writer_lease_status', 'workspace_writer_lease_renew', 'workspace_writer_lease_release', 'workspace_register', 'workspace_info', 'workspace_tree', 'project_snapshot', 'engineering_prepare_task', 'engineering_start_task', 'engineering_get_status', 'engineering_build_artifact', 'engineering_complete_build', 'engineering_upload_worker', 'read_file', 'read_files',
+      'workspace_list', 'workspace_path_preflight', 'workspace_writer_lease_acquire', 'workspace_writer_admission_snapshot', 'workspace_writer_lease_status', 'workspace_writer_lease_renew', 'workspace_writer_lease_release', 'workspace_register', 'workspace_info', 'workspace_tree', 'project_snapshot', 'engineering_prepare_task', 'engineering_start_task', 'engineering_get_status', 'engineering_build_artifact', 'engineering_complete_build', 'engineering_upload_worker', 'read_file', 'read_files',
       'search_files', 'search_text', 'git_status', 'git_diff', 'git_log', 'git_clone_safe', 'git_clone_status', 'git_clone_cancel', 'git', 'write_file',
       'apply_patch', 'edit_file', 'move_file', 'copy_file', 'delete_file', 'list_recovery_items', 'restore_deleted_file', 'list_checkpoints', 'restore_checkpoint', 'process_start', 'process_list', 'process_status',
       'process_logs', 'process_stop', 'project_dev', 'project_test', 'project_lint',

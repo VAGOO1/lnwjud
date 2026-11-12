@@ -42,31 +42,24 @@ describe('DurableShellTaskIndex', () => {
     expect(await index.hasReservation('blocked', 'a'.repeat(64))).toBe(false);
   });
 
-  it('keeps index diagnostics available while another reservation waits for native/task observation', async () => {
+  it('does not call or wait for foreign task observation during new reservation', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-index-nonblocking-inspection-'));
     temporaryRoots.push(root);
     const first = new DurableShellTaskIndex(root, { maxConcurrentTasks: 4, inspectTask: async () => 'active' as const });
     expect(await first.reserve({ taskId: 'existing', requestDigest: 'a'.repeat(64), ownerClientId: 'owner' })).toMatchObject({ ok: true });
 
-    let entered!: () => void;
-    let resume!: () => void;
-    const started = new Promise<void>((resolve): void => { entered = resolve; });
-    const stalled = new Promise<void>((resolve): void => { resume = resolve; });
+    const foreignProbe = vi.fn().mockRejectedValue(new Error('FOREIGN_PROBE_MUST_NOT_RUN'));
     const second = new DurableShellTaskIndex(root, {
       maxConcurrentTasks: 4,
-      inspectTask: async (): Promise<'active'> => { entered(); await stalled; return 'active'; },
+      inspectTask: foreignProbe,
     });
     const pending = second.reserve({ taskId: 'next', requestDigest: 'b'.repeat(64), ownerClientId: 'owner' });
-    await started;
-    try {
-      expect((await second.diagnostics()).unresolved_reservations).toBe(1);
-    } finally {
-      resume();
-    }
     expect(await pending).toMatchObject({ ok: true, value: { created: true } });
+    expect(foreignProbe).not.toHaveBeenCalled();
+    expect((await readdir(path.join(root, '.index', 'v1', 'active')))).toHaveLength(2);
   });
 
-  it('keeps index diagnostics available while native termination proof is in flight', async () => {
+  it('does not call or wait for foreign native proof during new reservation', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-index-native-inspection-'));
     temporaryRoots.push(root);
     const nativeReceiptPath = path.join(root, 'native.receipt.json');
@@ -85,46 +78,35 @@ describe('DurableShellTaskIndex', () => {
       },
     })).toMatchObject({ ok: true });
 
-    let entered!: () => void;
-    let resume!: () => void;
-    const started = new Promise<void>((resolve): void => { entered = resolve; });
-    const stalled = new Promise<void>((resolve): void => { resume = resolve; });
+    const foreignProbe = vi.fn().mockRejectedValue(new Error('FOREIGN_PROBE_MUST_NOT_RUN'));
     const second = new DurableShellTaskIndex(root, {
       maxConcurrentTasks: 4,
       inspectTask: async () => 'active' as const,
-      verifyContainedTermination: async (): Promise<boolean> => { entered(); await stalled; return false; },
+      verifyContainedTermination: foreignProbe,
     });
     const pending = second.reserve({ taskId: 'next', requestDigest: 'b'.repeat(64), ownerClientId: 'owner' });
-    await started;
-    try {
-      expect((await second.diagnostics()).unresolved_reservations).toBe(1);
-    } finally {
-      resume();
-    }
     expect(await pending).toMatchObject({ ok: true, value: { created: true } });
+    expect(foreignProbe).not.toHaveBeenCalled();
+    expect((await readdir(path.join(root, '.index', 'v1', 'active')))).toHaveLength(2);
   });
 
-  it('does not reclaim a marker replaced while terminal evidence is in flight', async () => {
+  it('retains a foreign marker without requesting terminal evidence', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-index-terminal-race-'));
     temporaryRoots.push(root);
     const first = new DurableShellTaskIndex(root, { maxConcurrentTasks: 4, inspectTask: async () => 'active' as const });
     expect(await first.reserve({ taskId: 'original', requestDigest: 'a'.repeat(64), ownerClientId: 'owner' })).toMatchObject({ ok: true });
-    let entered!: () => void;
-    let resume!: () => void;
-    const started = new Promise<void>((resolve): void => { entered = resolve; });
-    const stalled = new Promise<void>((resolve): void => { resume = resolve; });
+    const foreignProbe = vi.fn().mockRejectedValue(new Error('FOREIGN_PROBE_MUST_NOT_RUN'));
     const second = new DurableShellTaskIndex(root, {
       maxConcurrentTasks: 4,
-      inspectTask: async (): Promise<'terminal'> => { entered(); await stalled; return 'terminal'; },
+      inspectTask: foreignProbe,
     });
     const pending = second.reserve({ taskId: 'next', requestDigest: 'b'.repeat(64), ownerClientId: 'owner' });
-    await started;
     const marker = path.join(root, '.index', 'v1', 'active', createHash('sha256').update('original').digest('hex') + '.json');
     const original = JSON.parse(await readFile(marker, 'utf8')) as Record<string, unknown>;
-    await writeFile(marker, JSON.stringify({ ...original, requestDigest: 'c'.repeat(64) }));
-    resume();
+
     expect(await pending).toMatchObject({ ok: true });
-    expect(JSON.parse(await readFile(marker, 'utf8'))).toMatchObject({ requestDigest: 'c'.repeat(64) });
+    expect(JSON.parse(await readFile(marker, 'utf8'))).toEqual(original);
+    expect(foreignProbe).not.toHaveBeenCalled();
   });
 
   it('upgrades mixed legacy markers in place while baseline readers fail closed to current records', async () => {
@@ -211,7 +193,7 @@ describe('DurableShellTaskIndex', () => {
     const index = new DurableShellTaskIndex(root, { maxConcurrentTasks: 10, inspectTask: async (): Promise<'missing'> => 'missing' });
     expect(await index.reserve({ taskId: 'import', requestDigest: 'd'.repeat(64), ownerClientId: 'owner', mutationKind: 'repository_import' }))
       .toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
-    expect(JSON.parse(await readFile(marker, 'utf8'))).toMatchObject({ version: 2, taskId, requestDigest: 'c'.repeat(64) });
+    expect(JSON.parse(await readFile(marker, 'utf8'))).toMatchObject({ version: 1, taskId, requestDigest: 'c'.repeat(64) });
   });
 
   it('treats malformed JSON paths as active unknown reservations', async () => {
@@ -293,7 +275,7 @@ describe('DurableShellTaskIndex', () => {
     expect(results.filter((result) => result.ok)).toHaveLength(1);
   });
 
-  it('retains import exclusion across restart and permits writers after verified terminal observation', async () => {
+  it('retains import exclusion across restart until an explicit exact reservation release', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-import-lifetime-'));
     temporaryRoots.push(root);
     let terminal = false;
@@ -307,10 +289,12 @@ describe('DurableShellTaskIndex', () => {
     const writer = { taskId: 'writer', requestDigest: 'b'.repeat(64), ownerClientId: 'b' };
     expect(await restarted.reserve(writer)).toMatchObject({ ok: false });
     terminal = true;
+    expect(await restarted.reserve(writer)).toMatchObject({ ok: false });
+    await restarted.release(reservation.taskId, reservation.requestDigest);
     expect(await restarted.reserve(writer)).toMatchObject({ ok: true });
   });
 
-  it('bootstraps legacy terminal and active history once, then reinspects only active markers', async () => {
+  it('keeps explicit legacy initialization separate and refuses quarantined markers during admission', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-index-bootstrap-'));
     temporaryRoots.push(root);
     await mkdir(path.join(root, 'history-terminal'));
@@ -343,11 +327,8 @@ describe('DurableShellTaskIndex', () => {
       ownerWorkspaceId: 'workspace-a',
     });
 
-    expect(reserved).toMatchObject({ ok: true, value: { activeTasks: 3 } });
-    expect(warmInspector.mock.calls.map(([taskId]) => taskId).sort()).toEqual([
-      'history-running',
-      'history-unverified',
-    ]);
+    expect(reserved).toMatchObject({ ok: false, error: { code: 'CONFLICT' } });
+    expect(warmInspector).not.toHaveBeenCalled();
     await replacement.release('new-task', 'a'.repeat(64));
   });
 

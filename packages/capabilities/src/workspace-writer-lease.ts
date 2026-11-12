@@ -3,8 +3,10 @@ import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { appError, err, ok, type Result } from '@lnwjud/domain';
+import type { WriterAdmissionSnapshot } from './writer-admission-snapshot.js';
 
 export interface WorkspaceWriterGlobalExclusion {
+  snapshot?(): Promise<WriterAdmissionSnapshot>;
   holdExclusiveProbe(workspaceId: string): Promise<Result<{
     releaseAfterVerifiedTermination(): Promise<void>;
   }>>;
@@ -64,6 +66,7 @@ interface LeaseRow {
 interface CallRow { call_id: string; pid: number; generation: number; }
 
 export interface WorkspaceWriterLeasePort {
+  admissionSnapshot?(workspaceId: string): Promise<Result<WriterAdmissionSnapshot>>;
   acquire(workspaceId: string, ownerClientId: string, ownerSessionId: string, ttlSeconds: number, recoverAbandonedSameClient?: boolean): Promise<Result<WorkspaceWriterLeaseProof & { expiresAt: string }>>;
   inspect(workspaceId: string): Promise<Result<WorkspaceWriterLeaseStatus>>;
   begin(workspaceId: string, ownerClientId: string, ownerSessionId: string, callId: string, proof?: WorkspaceWriterLeaseProof): Promise<Result<{ required: boolean; generation: number }>>;
@@ -172,6 +175,13 @@ export class SqliteWorkspaceWriterLease implements WorkspaceWriterLeasePort {
     finally {
       if (globalProbe?.ok === true) await globalProbe.value.releaseAfterVerifiedTermination().catch(() => undefined);
     }
+  }
+
+  /** No SQLite access, PID probes or fallback to the mutating admission path. */
+  public async admissionSnapshot(workspaceId: string): Promise<Result<WriterAdmissionSnapshot>> {
+    if (!validIdentity(workspaceId)) return invalid();
+    if (this.globalExclusion?.snapshot === undefined) return unavailable();
+    try { return ok(await this.globalExclusion.snapshot()); } catch { return unavailable(); }
   }
 
   public async inspect(workspaceId: string): Promise<Result<WorkspaceWriterLeaseStatus>> {

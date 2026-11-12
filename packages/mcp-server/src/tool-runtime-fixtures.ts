@@ -64,6 +64,7 @@ export const CORE_TOOL_RUNTIME_FIXTURES = {
   workspace_list: service({}, 'workspaceInfo.list'),
   workspace_path_preflight: service({ path: 'E:\\project', userConfirmed: true }, 'workspaceInfo.preflight'),
   workspace_writer_lease_acquire: service({ workspaceId, ttlSeconds: 60 }, 'workspaceWriterLease.acquire'),
+  workspace_writer_admission_snapshot: service({ workspaceId }, 'workspaceWriterLease.admissionSnapshot'),
   workspace_writer_lease_status: service({ workspaceId }, 'workspaceWriterLease.inspect'),
   workspace_writer_lease_renew: service({ workspaceId, writerLease: { leaseId: '00000000-0000-4000-8000-000000000001', leaseToken: 'smoke-test-only', generation: 1 }, ttlSeconds: 60 }, 'workspaceWriterLease.renew'),
   workspace_writer_lease_release: service({ workspaceId, writerLease: { leaseId: '00000000-0000-4000-8000-000000000001', leaseToken: 'smoke-test-only', generation: 1 } }, 'workspaceWriterLease.release'),

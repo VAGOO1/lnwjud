@@ -13,6 +13,7 @@ import { once } from 'node:events';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import type { PosixProcessGroupObservation } from '@lnwjud/process';
+import { DurableShellTaskIndex } from './durable-shell-task-index.js';
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
@@ -942,6 +943,9 @@ describe('durable shell background tasks', () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'lnwjud-durable-memory-'));
     temporaryRoots.push(root);
     const taskStateDirectory = path.join(root, '.tasks');
+    // Establish a valid empty index before seeding synthetic historical data.
+    // New admission deliberately does not migrate a nonempty legacy task root.
+    await new DurableShellTaskIndex(taskStateDirectory, { maxConcurrentTasks: 16, inspectTask: async () => 'unknown' as const }).initialize();
     const historicalId = 'historical-completed';
     const historicalDirectory = path.join(taskStateDirectory, historicalId);
     await mkdir(historicalDirectory, { recursive: true });

@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -23,14 +23,6 @@ describe('managed writer and durable shell admission', () => {
       expect(await admission.enter({ actorClientId: 'writer', workspaceId: `workspace-${i}`, kind: 'uncontained_process' })).toMatchObject({ ok: true });
     }
     const directory = path.join(root, '.index', 'v1', 'active');
-    for (const filename of await readdir(directory)) {
-      const target = path.join(directory, filename);
-      const marker: unknown = JSON.parse(await readFile(target, 'utf8'));
-      if (typeof marker === 'object' && marker !== null) {
-        Reflect.deleteProperty(marker, 'capacityClass');
-        await writeFile(target, JSON.stringify(marker));
-      }
-    }
     const index = new DurableShellTaskIndex(root, { maxConcurrentTasks: 1, inspectTask: async (): Promise<ActiveTaskInspection> => 'missing' });
     expect(await index.reserve(request)).toMatchObject({ ok: true, value: { activeTasks: 1 } });
     expect(await index.reserve({ ...request, taskId: 'second-shell', requestDigest: 'b'.repeat(64) })).toMatchObject({ ok: false, error: { code: 'CONFLICT', details: { durable_shell_reservations: 1, managed_writer_reservations: 17 } } });
@@ -53,14 +45,22 @@ describe('managed writer and durable shell admission', () => {
     expect(JSON.stringify(response)).not.toMatch(/private-client|private-session|private-workspace|managed-writer-/);
   });
 
-  it('retains a verified terminal marker if removal fails, and retries removal before granting capacity', async () => {
+  it('retains terminal markers until exact release succeeds, never repairing them during reserve', async () => {
     const root = await fixture();
     const initial = new DurableShellTaskIndex(root, { maxConcurrentTasks: 1, inspectTask: async (): Promise<ActiveTaskInspection> => 'missing' });
     expect(await initial.reserve(request)).toMatchObject({ ok: true });
-    const removeFile = vi.fn<typeof rm>().mockRejectedValueOnce(new Error('disk unavailable')).mockImplementation(rm);
+    let failRemoval = true;
+    const removeFile = vi.fn<typeof rm>().mockImplementation(async (filename, options) => {
+      if (path.basename(filename.toString()) !== 'index.lock' && failRemoval) { failRemoval = false; throw new Error('disk unavailable'); }
+      await rm(filename, options);
+    });
     const reopened = new DurableShellTaskIndex(root, { maxConcurrentTasks: 1, inspectTask: async (): Promise<ActiveTaskInspection> => 'terminal', removeFile });
     expect(await reopened.reserve({ ...request, taskId: 'replacement', requestDigest: 'c'.repeat(64) })).toMatchObject({ ok: false });
     expect(await initial.hasReservation(request.taskId, request.requestDigest)).toBe(true);
+    await reopened.release(request.taskId, request.requestDigest);
+    expect(await initial.hasReservation(request.taskId, request.requestDigest)).toBe(true);
+    expect(await reopened.reserve({ ...request, taskId: 'replacement', requestDigest: 'c'.repeat(64) })).toMatchObject({ ok: false });
+    await reopened.release(request.taskId, request.requestDigest);
     expect(await reopened.reserve({ ...request, taskId: 'replacement', requestDigest: 'c'.repeat(64) })).toMatchObject({ ok: true });
     expect(await initial.hasReservation(request.taskId, request.requestDigest)).toBe(false);
   });
