@@ -65,6 +65,7 @@ export interface TownCopy {
   readonly activeAi: string; readonly aiUnknown: string; readonly aiVisibilityNote: string;
   readonly plaza: string; readonly forge: string; readonly peak: string;
   readonly approvalGate: string; readonly messenger: string; readonly catStudio: string; readonly trainingYard: string;
+  readonly recentFacts: (finished: number, failed: number) => string;
   readonly plazaFacts: (calls: number, ai: number) => string;
   readonly forgeFacts: (installed: boolean, version: string | null, running: number) => string;
   readonly peakFacts: (running: number) => string;
@@ -96,6 +97,7 @@ const TH: TownCopy = {
   plaza: 'Central Plaza · ลานกลางเมือง', forge: 'Codex Forge · โรงตีดาบ Codex', peak: 'Research Peak · ยอดเขาค้นคว้า',
   approvalGate: 'Approval Gate · ประตูอนุมัติ', messenger: 'Messenger Post · ที่ทำการส่งสาร',
   catStudio: 'Orange Cat Studio · สตูดิโอแมวส้ม', trainingYard: 'Training Yard · ลานฝึก',
+  recentFacts: (finished, failed) => `15 นาทีที่ผ่านมา เสร็จ ${finished} งาน${failed > 0 ? ` (ผิดพลาด ${failed})` : ''}`,
   plazaFacts: (calls, ai) => `ตอนนี้มีงานรันอยู่ ${calls} งาน จาก ${ai} AI`,
   forgeFacts: (installed, version, running) => `${installed ? `ติดตั้งแล้ว${version === null ? '' : ` (v${version})`}` : 'ยังไม่ได้ติดตั้ง'} · งาน Codex ที่รันอยู่ ${running}`,
   peakFacts: (running) => `งานค้นหา/ค้นคว้าที่รันอยู่ ${running}`,
@@ -126,6 +128,7 @@ const EN: TownCopy = {
   aiCalls: (n) => `${n} call(s)`, byAi: 'by',
   plaza: 'Central Plaza', forge: 'Codex Forge', peak: 'Research Peak',
   approvalGate: 'Approval Gate', messenger: 'Messenger Post', catStudio: 'Orange Cat Studio', trainingYard: 'Training Yard',
+  recentFacts: (finished, failed) => `Last 15 min: ${finished} finished${failed > 0 ? ` (${failed} failed)` : ''}`,
   plazaFacts: (calls, ai) => `${calls} call(s) running now from ${ai} AI(s)`,
   forgeFacts: (installed, version, running) => `${installed ? `Installed${version === null ? '' : ` (v${version})`}` : 'Not installed'} · Codex calls running ${running}`,
   peakFacts: (running) => `Look-up calls running ${running}`,
